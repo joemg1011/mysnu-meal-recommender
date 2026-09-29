@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, useMemo, useState } from "react";
+import { ChangeEvent, useEffect, useMemo, useState } from "react";
 
 type Menu = {
   id: string;
@@ -11,13 +11,14 @@ type Menu = {
   score: number;
   votes: number;
   confidence: "높음" | "보통" | "낮음";
+  price?: number;
 };
 
 type Meal = {
   id: string;
   cafeteria: string;
   location: string;
-  time: "중식" | "석식";
+  time: "조식" | "중식" | "석식";
   emoji: string;
   menu: Menu[];
 };
@@ -73,22 +74,108 @@ function formatKcal(value: number) {
   return `${value.toLocaleString("ko-KR")} kcal`;
 }
 
+const SIKSHA_API = "https://siksha-server.wafflestudio.com";
+
+function todayInSeoul() {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Seoul", year: "numeric", month: "2-digit", day: "2-digit"
+  }).formatToParts(new Date());
+  const value = (type: string) => parts.find((part) => part.type === type)?.value || "";
+  return `${value("year")}-${value("month")}-${value("day")}`;
+}
+
+function dateLabel(date: string) {
+  const day = new Date(`${date}T12:00:00+09:00`);
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Seoul", month: "numeric", day: "numeric" }).formatToParts(day);
+  const value = (type: string) => parts.find((part) => part.type === type)?.value || "";
+  const weekday = new Intl.DateTimeFormat("ko-KR", { timeZone: "Asia/Seoul", weekday: "short" }).format(day);
+  return `${value("month")}월 ${value("day")}일 ${weekday}`;
+}
+
+function estimateCalories(name: string) {
+  if (/샐러드|나물|피클|김치|과일|두부/.test(name)) return 95;
+  if (/찌개|국|탕|쌀국수|라면|우동/.test(name)) return 410;
+  if (/돈까스|치킨|제육|불고기|갈비|닭/.test(name)) return 610;
+  if (/덮밥|볶음밥|비빔밥|카레|파스타/.test(name)) return 590;
+  if (/밥|김밥/.test(name)) return 330;
+  if (/빵|버거|샌드위치/.test(name)) return 480;
+  return 320;
+}
+
+function mealTag(type: string): Meal["time"] {
+  return type === "br" ? "조식" : type === "dn" ? "석식" : "중식";
+}
+
+function liveMealsFromSiksha(payload: any): Meal[] {
+  const day = Array.isArray(payload?.result) ? payload.result[0] : null;
+  if (!day) return [];
+  const groups = ["br", "lu", "dn"];
+  return groups.flatMap((group) => (day[group] || [])
+    .filter((restaurant: any) => Array.isArray(restaurant.menus) && restaurant.menus.length)
+    .map((restaurant: any) => ({
+      id: `siksha-${group}-${restaurant.id}`,
+      cafeteria: restaurant.name_kr || restaurant.nameKr || restaurant.code || "식샤 등록 식당",
+      location: restaurant.addr || "식샤 연동 식당",
+      time: mealTag(group),
+      emoji: group === "br" ? "🥪" : group === "dn" ? "🍱" : "🍽️",
+      menu: restaurant.menus.map((item: any) => ({
+        id: `siksha-${item.id}`,
+        name: String(item.name_kr || item.nameKr || item.code || "이름 없는 메뉴").replace(/<|>/g, ""),
+        kcal: estimateCalories(item.name_kr || item.nameKr || item.code || ""),
+        category: mealTag(group),
+        tags: ["식샤"],
+        score: Number(item.score) || 0,
+        votes: Number(item.review_cnt) || 0,
+        confidence: "낮음" as const,
+        price: item.price == null ? undefined : Number(item.price)
+      }))
+    })));
+}
+
 export default function Home() {
   const [view, setView] = useState("home");
   const [meals, setMeals] = useState(initialMeals);
   const [cafeteria, setCafeteria] = useState("전체 식당");
+  const [mealType, setMealType] = useState<Meal["time"]>("중식");
   const [selected, setSelected] = useState<string[]>(["beef", "rice", "pork", "greens"]);
   const [target, setTarget] = useState("유지");
   const [notice, setNotice] = useState("");
   const [vote, setVote] = useState<"like" | "dislike" | null>(null);
   const [showAdmin, setShowAdmin] = useState(false);
+  const [syncState, setSyncState] = useState<"loading" | "live" | "fallback">("loading");
+  const [menuDate, setMenuDate] = useState(todayInSeoul());
+
+  useEffect(() => {
+    let active = true;
+    const loadSiksha = async () => {
+      const date = todayInSeoul();
+      try {
+        const response = await fetch(`${SIKSHA_API}/menus/web?start_date=${date}&end_date=${date}&except_empty=false`);
+        if (!response.ok) throw new Error("식샤 서버 응답 오류");
+        const nextMeals = liveMealsFromSiksha(await response.json());
+        if (!nextMeals.length) throw new Error("등록된 식단 없음");
+        if (active) {
+          setMeals(nextMeals);
+          setSelected([]);
+          setMenuDate(date);
+          setSyncState("live");
+        }
+      } catch {
+        if (active) setSyncState("fallback");
+      }
+    };
+    loadSiksha();
+    const refresh = window.setInterval(loadSiksha, 10 * 60 * 1000);
+    return () => { active = false; window.clearInterval(refresh); };
+  }, []);
 
   const allMenu = meals.flatMap((meal) => meal.menu);
   const todayTotal = useMemo(
     () => allMenu.filter((item) => selected.includes(item.id)).reduce((sum, item) => sum + item.kcal, 0),
     [allMenu, selected]
   );
-  const filteredMeals = cafeteria === "전체 식당" ? meals : meals.filter((meal) => meal.cafeteria === cafeteria);
+  const filteredMeals = (cafeteria === "전체 식당" ? meals : meals.filter((meal) => meal.cafeteria === cafeteria))
+    .filter((meal) => meal.time === mealType);
   const progress = Math.min(100, Math.round((todayTotal / (target === "다이어트" ? 1550 : target === "벌크업" ? 2500 : 2000)) * 100));
 
   function toggleSelection(id: string) {
@@ -149,6 +236,8 @@ export default function Home() {
           allMeals={meals}
           cafeteria={cafeteria}
           setCafeteria={setCafeteria}
+          mealType={mealType}
+          setMealType={setMealType}
           selected={selected}
           toggleSelection={toggleSelection}
           total={todayTotal}
@@ -157,6 +246,8 @@ export default function Home() {
           onVote={registerVote}
           vote={vote}
           setView={setView}
+          syncState={syncState}
+          menuDate={menuDate}
         />}
         {view === "upload" && <UploadView onComplete={addUploadedMeal} />}
         {view === "records" && <RecordsView selected={selected} allMenu={allMenu} total={todayTotal} />}
@@ -171,13 +262,18 @@ export default function Home() {
   );
 }
 
-function HomeView({ meals, allMeals, cafeteria, setCafeteria, selected, toggleSelection, total, progress, target, onVote, vote, setView }: {
-  meals: Meal[]; allMeals: Meal[]; cafeteria: string; setCafeteria: (value: string) => void; selected: string[]; toggleSelection: (id: string) => void; total: number; progress: number; target: string; onVote: (value: "like" | "dislike") => void; vote: "like" | "dislike" | null; setView: (view: string) => void;
+function HomeView({ meals, allMeals, cafeteria, setCafeteria, mealType, setMealType, selected, toggleSelection, total, progress, target, onVote, vote, setView, syncState, menuDate }: {
+  meals: Meal[]; allMeals: Meal[]; cafeteria: string; setCafeteria: (value: string) => void; mealType: Meal["time"]; setMealType: (value: Meal["time"]) => void; selected: string[]; toggleSelection: (id: string) => void; total: number; progress: number; target: string; onVote: (value: "like" | "dislike") => void; vote: "like" | "dislike" | null; setView: (view: string) => void; syncState: "loading" | "live" | "fallback"; menuDate: string;
 }) {
-  const recommendation = allMeals[1]?.menu[0] || allMeals[0].menu[0];
+  const relevantMeals = allMeals.filter((meal) => meal.time === mealType);
+  const recommendedMeal = (relevantMeals.length ? relevantMeals : allMeals).flatMap((meal) => meal.menu)
+    .sort((first, second) => (second.score * 10 + second.votes) - (first.score * 10 + first.votes))[0];
+  const recommendation = recommendedMeal || allMeals[0]?.menu[0];
+  const recommendationRestaurant = allMeals.find((meal) => meal.menu.some((menu) => menu.id === recommendation?.id));
+  if (!recommendation) return null;
   return <>
     <section className="hero">
-      <p className="eyebrow">9월 29일 화요일 · 중식</p>
+      <p className="eyebrow">{dateLabel(menuDate)} · {mealType}</p>
       <h1>오늘, <em>무엇을 먹을까요?</em></h1>
       <p className="hero-copy">내 취향과 오늘의 칼로리 목표를 반영한<br />학식 추천을 확인해 보세요.</p>
       <div className="date-switcher"><button aria-label="어제">‹</button><strong>오늘</strong><button aria-label="내일">›</button></div>
@@ -186,10 +282,10 @@ function HomeView({ meals, allMeals, cafeteria, setCafeteria, selected, toggleSe
     <section className="recommend-card">
       <div className="recommend-top"><span className="sparkle">✦</span><span>오늘의 맞춤 추천</span><span className="match">92% 취향 일치</span></div>
       <div className="recommend-content">
-        <div><p className="restaurant">{allMeals[1]?.cafeteria || "기숙사 식당"}</p><h2>{recommendation.name}</h2><p className="why">평소 양식 메뉴를 선호하고, 오늘 평점이 높아요.</p></div>
+        <div><p className="restaurant">{recommendationRestaurant?.cafeteria || "식샤 연동 식당"}</p><h2>{recommendation.name}</h2><p className="why">식샤 이용자 평점과 인기를 바탕으로 추천했어요.</p></div>
         <div className="food-emoji">🍝</div>
       </div>
-      <div className="recommend-footer"><span>★ {recommendation.score} <small>({recommendation.votes}명)</small></span><span>{formatKcal(recommendation.kcal)} · 추정치</span></div>
+      <div className="recommend-footer"><span>{recommendation.score ? <>★ {recommendation.score.toFixed(1)} <small>({recommendation.votes}명)</small></> : "신규 메뉴"}</span><span>{formatKcal(recommendation.kcal)} · 추정치</span></div>
       <div className="vote-row"><span>이 추천, 마음에 드나요?</span><button className={vote === "like" ? "selected-vote" : ""} onClick={() => onVote("like")}>👍 맛있어 보여요</button><button className={vote === "dislike" ? "selected-vote" : ""} onClick={() => onVote("dislike")}>👎 별로예요</button></div>
     </section>
 
@@ -201,17 +297,18 @@ function HomeView({ meals, allMeals, cafeteria, setCafeteria, selected, toggleSe
     </section>
 
     <section className="meal-heading"><div><p className="eyebrow">오늘의 식단</p><h2>어디서 먹을까요?</h2></div><button onClick={() => setView("upload")}>식단 등록 <span>＋</span></button></section>
+    <div className={`sync-status ${syncState}`}><span>{syncState === "live" ? "●" : syncState === "loading" ? "◌" : "!"}</span>{syncState === "live" ? `식샤 실시간 연동 · ${allMeals.length}개 식당 메뉴` : syncState === "loading" ? "식샤 식단을 불러오는 중" : "식샤 연결이 지연되어 예시 식단을 표시 중"}<small>{syncState === "live" ? "10분마다 갱신" : ""}</small></div>
     <div className="filter-row">
       {['전체 식당', ...allMeals.map((meal) => meal.cafeteria)].filter((item, index, items) => items.indexOf(item) === index).map((item) => <button className={cafeteria === item ? "chosen" : ""} key={item} onClick={() => setCafeteria(item)}>{item}</button>)}
     </div>
-    <div className="time-tabs"><button className="active">중식 <small>11:30–14:00</small></button><button>석식 <small>17:00–19:00</small></button></div>
+    <div className="time-tabs three"><button className={mealType === "조식" ? "active" : ""} onClick={() => setMealType("조식")}>조식</button><button className={mealType === "중식" ? "active" : ""} onClick={() => setMealType("중식")}>중식</button><button className={mealType === "석식" ? "active" : ""} onClick={() => setMealType("석식")}>석식</button></div>
     <div className="meal-list">
       {meals.map((meal) => <article className="meal-card" key={meal.id}>
         <div className="meal-title"><div className="meal-icon">{meal.emoji}</div><div><h3>{meal.cafeteria}</h3><p>{meal.location} · {meal.time}</p></div><button className="more" aria-label={`${meal.cafeteria} 상세 보기`}>···</button></div>
         <div className="menu-list">{meal.menu.map((menu) => <button key={menu.id} className={`menu-item ${selected.includes(menu.id) ? "checked" : ""}`} onClick={() => toggleSelection(menu.id)}>
-          <span className="check">{selected.includes(menu.id) ? "✓" : ""}</span><span className="menu-name">{menu.name}<small>{menu.tags.map(tag => <i key={tag}>{tag}</i>)}</small></span><span className="menu-meta"><b>{formatKcal(menu.kcal)}</b><small>{menu.confidence} 신뢰도</small></span>
+          <span className="check">{selected.includes(menu.id) ? "✓" : ""}</span><span className="menu-name">{menu.name}<small>{menu.tags.map(tag => <i key={tag}>{tag}</i>)}</small></span><span className="menu-meta"><b>{formatKcal(menu.kcal)}</b><small>{menu.price ? `${menu.price.toLocaleString("ko-KR")}원 · ` : ""}{menu.confidence} 신뢰도</small></span>
         </button>)}</div>
-        <div className="meal-bottom"><span>{meal.menu[0].score ? <>★ {meal.menu[0].score} <small>{meal.menu[0].votes}명 평가</small></> : "새로 등록된 식단"}</span><button>상세 보기 ›</button></div>
+        <div className="meal-bottom"><span>{meal.menu[0].score ? <>★ {meal.menu[0].score.toFixed(1)} <small>{meal.menu[0].votes}명 평가</small></> : "식샤 등록 메뉴"}</span><button>상세 보기 ›</button></div>
       </article>)}
       {!meals.length && <div className="empty"><span>🍽️</span><h3>등록된 식단이 없어요</h3><p>직접 입력하거나 이미지로 식단을 등록해 보세요.</p></div>}
     </div>
