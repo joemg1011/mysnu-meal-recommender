@@ -1,7 +1,8 @@
 "use client";
 
-import { ChangeEvent, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { estimateCalories, userCalories } from "../lib/calories";
+import { cleanOcrText, shiftDate } from "../lib/meal-utils";
 
 type Menu = {
   id: string;
@@ -29,12 +30,13 @@ type Meal = {
 };
 
 type SavedUpload = Meal & { date: string };
-type MealRecord = { id: string; name: string; category: string; cafeteria: string; kcal: number | null };
+type MealRecord = { id: string; name: string; category: string; cafeteria: string; kcal: number | null; confirmed?: boolean };
 type LocalData = {
   version: 1;
   recordsByDate: Record<string, MealRecord[]>;
   votes: Record<string, "like" | "dislike">;
   target: string;
+  targetKcal: number;
   preferredCategories: string[];
   allergies: string[];
   dislikedIngredients: string;
@@ -53,7 +55,10 @@ function readLocalData(): LocalData | null {
       version: 1,
       recordsByDate: data.recordsByDate && typeof data.recordsByDate === "object" ? data.recordsByDate : {},
       votes: data.votes && typeof data.votes === "object" ? data.votes : {},
-      target: ["다이어트", "유지", "벌크업"].includes(data.target) ? data.target : "유지",
+      target: ["다이어트", "유지", "벌크업", "직접 설정"].includes(data.target) ? data.target : "유지",
+      targetKcal: Number.isFinite(data.targetKcal) && data.targetKcal >= 500 && data.targetKcal <= 5000
+        ? Math.round(data.targetKcal)
+        : data.target === "다이어트" ? 1550 : data.target === "벌크업" ? 2500 : 2000,
       preferredCategories: Array.isArray(data.preferredCategories) ? data.preferredCategories.filter((item: unknown) => CATEGORY_OPTIONS.includes(String(item))) : [],
       allergies: Array.isArray(data.allergies) ? data.allergies.filter((item: unknown) => ALLERGY_OPTIONS.includes(String(item))) : [],
       dislikedIngredients: typeof data.dislikedIngredients === "string" ? data.dislikedIngredients : "",
@@ -145,6 +150,11 @@ function todayInSeoul() {
   return `${value("year")}-${value("month")}-${value("day")}`;
 }
 
+function relativeDateLabel(date: string) {
+  const today = todayInSeoul();
+  return date === today ? "오늘" : date === shiftDate(today, -1) ? "어제" : date === shiftDate(today, 1) ? "내일" : dateLabel(date);
+}
+
 function dateLabel(date: string) {
   const day = new Date(`${date}T12:00:00+09:00`);
   const parts = new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Seoul", month: "numeric", day: "numeric" }).formatToParts(day);
@@ -184,20 +194,20 @@ function liveMealsFromSiksha(payload: any): Meal[] {
 
 export default function Home() {
   const [view, setView] = useState("home");
-  const [meals, setMeals] = useState(initialMeals);
+  const [meals, setMeals] = useState<Meal[]>([]);
   const [cafeteria, setCafeteria] = useState("전체 식당");
   const [mealType, setMealType] = useState<Meal["time"]>("중식");
   const [recordsByDate, setRecordsByDate] = useState<Record<string, MealRecord[]>>({});
   const [votes, setVotes] = useState<Record<string, "like" | "dislike">>({});
   const [target, setTarget] = useState("유지");
+  const [targetKcal, setTargetKcal] = useState(2000);
   const [preferredCategories, setPreferredCategories] = useState<string[]>([]);
   const [allergies, setAllergies] = useState<string[]>([]);
   const [dislikedIngredients, setDislikedIngredients] = useState("");
   const [uploads, setUploads] = useState<SavedUpload[]>([]);
   const [storageReady, setStorageReady] = useState(false);
   const [notice, setNotice] = useState("");
-  const [showAdmin, setShowAdmin] = useState(false);
-  const [syncState, setSyncState] = useState<"loading" | "live" | "fallback">("loading");
+  const [syncState, setSyncState] = useState<"loading" | "live" | "fallback" | "empty" | "error">("loading");
   const [menuDate, setMenuDate] = useState(todayInSeoul());
   const [editingMenu, setEditingMenu] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
@@ -205,16 +215,15 @@ export default function Home() {
     const saved = readLocalData();
     if (saved) {
       const overrides = readCalorieOverrides();
-      const restoredUploads = saved.uploads.filter(meal => meal.date === todayInSeoul()).map(meal => ({
-        ...meal,
+      const restoredUploads = saved.uploads.filter(meal => meal.date === todayInSeoul()).map(meal => ({ ...meal,
         menu: meal.menu.map(menu => {
           const entered = overrides[`${meal.date}:${menu.id}`];
           return Number.isFinite(entered) && entered > 0 ? { ...menu, ...userCalories(entered) } : menu;
-        })
-      }));
+        }) }));
       setRecordsByDate(saved.recordsByDate);
       setVotes(saved.votes);
       setTarget(saved.target);
+      setTargetKcal(saved.targetKcal);
       setPreferredCategories(saved.preferredCategories);
       setAllergies(saved.allergies);
       setDislikedIngredients(saved.dislikedIngredients);
@@ -226,15 +235,21 @@ export default function Home() {
 
   useEffect(() => {
     if (!storageReady) return;
-    const data: LocalData = { version: 1, recordsByDate, votes, target, preferredCategories, allergies, dislikedIngredients, uploads };
+    const data: LocalData = { version: 1, recordsByDate, votes, target, targetKcal, preferredCategories, allergies, dislikedIngredients, uploads };
     try { window.localStorage.setItem(LOCAL_DATA_KEY, JSON.stringify(data)); }
     catch { setNotice("기기 저장 공간이 부족하거나 차단되어 기록을 저장하지 못했어요."); }
-  }, [storageReady, recordsByDate, votes, target, preferredCategories, allergies, dislikedIngredients, uploads]);
+  }, [storageReady, recordsByDate, votes, target, targetKcal, preferredCategories, allergies, dislikedIngredients, uploads]);
 
   useEffect(() => {
     let active = true;
     const loadSiksha = async () => {
-      const date = todayInSeoul();
+      const date = menuDate;
+      setSyncState("loading");
+      setMeals(uploads.filter(meal => meal.date === date).map(meal => ({ ...meal,
+        menu: meal.menu.map(menu => {
+          const entered = readCalorieOverrides()[`${date}:${menu.id}`];
+          return Number.isFinite(entered) && entered > 0 ? { ...menu, ...userCalories(entered) } : menu;
+        }) })));
       try {
         const response = await fetch(`${SIKSHA_API}/menus/web?start_date=${date}&end_date=${date}&except_empty=false`);
         if (!response.ok) throw new Error("식샤 서버 응답 오류");
@@ -246,28 +261,41 @@ export default function Home() {
             return Number.isFinite(entered) && entered > 0 ? { ...menu, ...userCalories(entered) } : menu;
           })
         }));
-        if (!nextMeals.length) throw new Error("등록된 식단 없음");
         if (active) {
-          setMeals(previous => [...previous.filter(meal => meal.id.startsWith("upload-") && (meal as SavedUpload).date === date), ...nextMeals]);
-          setMenuDate(date);
-          setSyncState("live");
+          setMeals([...uploads.filter(meal => meal.date === date).map(meal => ({ ...meal,
+            menu: meal.menu.map(menu => {
+              const entered = overrides[`${date}:${menu.id}`];
+              return Number.isFinite(entered) && entered > 0 ? { ...menu, ...userCalories(entered) } : menu;
+            }) })), ...nextMeals]);
+          setSyncState(nextMeals.length ? "live" : "empty");
         }
       } catch {
-        if (active) setSyncState("fallback");
+        if (active) {
+          if (date === todayInSeoul()) {
+            setMeals([...uploads.filter(meal => meal.date === date), ...initialMeals.map(meal => ({ ...meal, menu: meal.menu.map(menu => ({ ...menu, score: 0, votes: 0, tags: ["예시"] })) }))]);
+            setSyncState("fallback");
+          } else setSyncState("error");
+        }
       }
     };
     loadSiksha();
     const refresh = window.setInterval(loadSiksha, 10 * 60 * 1000);
     return () => { active = false; window.clearInterval(refresh); };
-  }, []);
+  }, [menuDate, uploads]);
 
-  const selectedRecords = recordsByDate[menuDate] || [];
+  const selectedRecords = (recordsByDate[menuDate] || []).filter(item => item.confirmed === true);
   const selected = selectedRecords.map(item => item.id);
   const todayTotal = selectedRecords.reduce((sum, item) => sum + (item.kcal || 0), 0);
   const unknownSelected = selectedRecords.filter(item => item.kcal === null).length;
   const filteredMeals = (cafeteria === "전체 식당" ? meals : meals.filter((meal) => meal.cafeteria === cafeteria))
     .filter((meal) => meal.time === mealType);
-  const progress = Math.min(100, Math.round((todayTotal / (target === "다이어트" ? 1550 : target === "벌크업" ? 2500 : 2000)) * 100));
+  const progress = Math.min(100, Math.round((todayTotal / targetKcal) * 100));
+
+  function changeDate(date: string) {
+    setMenuDate(date);
+    setCafeteria("전체 식당");
+    setEditingMenu(null);
+  }
 
   function toggleSelection(id: string) {
     const meal = meals.find(item => item.menu.some(menu => menu.id === id));
@@ -275,9 +303,9 @@ export default function Home() {
     if (!meal || !menu) return;
     setRecordsByDate(previous => {
       const daily = previous[menuDate] || [];
-      return { ...previous, [menuDate]: daily.some(item => item.id === id)
+      return { ...previous, [menuDate]: daily.some(item => item.id === id && item.confirmed === true)
         ? daily.filter(item => item.id !== id)
-        : [...daily, { id, name: menu.name, category: menu.category, cafeteria: meal.cafeteria, kcal: menu.kcal }] };
+        : [...daily.filter(item => item.id !== id), { id, name: menu.name, category: menu.category, cafeteria: meal.cafeteria, kcal: menu.kcal, confirmed: true }] };
     });
   }
 
@@ -311,25 +339,36 @@ export default function Home() {
   }
 
   function registerVote(menuId: string, nextVote: "like" | "dislike") {
-    setVotes(previous => ({ ...previous, [menuId]: nextVote }));
-    setNotice("평가를 이 기기에 저장하고 다음 추천에 반영할게요.");
+    const menu = meals.flatMap(meal => meal.menu).find(item => item.id === menuId);
+    if (!menu) return;
+    const key = `name:${menu.name.trim().toLowerCase()}`;
+    setVotes(previous => {
+      const next = { ...previous };
+      const current = next[key] || next[menuId];
+      delete next[menuId];
+      if (current === nextVote) delete next[key];
+      else next[key] = nextVote;
+      return next;
+    });
+    setNotice("관심 표시를 이 기기에 저장하고 같은 이름의 메뉴 추천에 반영해요.");
   }
 
-  function addUploadedMeal(name: string, rawText: string) {
-    const cleaned = rawText.split(/[\n,]/).map((item) => item.trim()).filter(Boolean).slice(0, 5);
+  function addUploadedMeal(name: string, rawText: string, date: string, time: Meal["time"]) {
+    const cleaned = rawText.split(/[\n,]/).map((item) => item.trim()).filter(Boolean).slice(0, 30);
     if (!cleaned.length) {
       setNotice("읽어올 메뉴를 한 줄 이상 입력해 주세요.");
       return;
     }
+    const stamp = Date.now();
     const newMeal: SavedUpload = {
-      id: `upload-${Date.now()}`,
-      date: menuDate,
-      cafeteria: name || "새 식당",
+      id: `upload-${stamp}`,
+      date,
+      cafeteria: name.trim() || "직접 등록한 식당",
       location: "사용자 등록 식단",
-      time: "중식",
+      time,
       emoji: "📋",
       menu: cleaned.map((menuName, index) => ({
-        id: `custom-${Date.now()}-${index}`,
+        id: `custom-${stamp}-${index}`,
         name: menuName,
         ...estimateCalories(menuName),
         category: menuCategory(menuName),
@@ -338,11 +377,27 @@ export default function Home() {
         votes: 0,
       }))
     };
-    setMeals((previous) => [newMeal, ...previous]);
     setUploads(previous => [newMeal, ...previous].slice(0, 50));
+    setMenuDate(date);
+    setMealType(time);
     setCafeteria("전체 식당");
     setView("home");
-    setNotice("식단을 이 기기에 저장했어요. 칼로리는 메뉴를 눌러 수정할 수 있어요.");
+    setNotice("식단을 이 기기에 저장했어요. 메뉴 옆 '수정'에서 칼로리를 바꿀 수 있어요.");
+  }
+
+  function removeUpload(id: string) {
+    if (!window.confirm("직접 등록한 식단을 삭제할까요? 이 식단의 먹은 기록도 함께 삭제됩니다.")) return;
+    setUploads(previous => previous.filter(meal => meal.id !== id));
+    setRecordsByDate(previous => ({ ...previous, [menuDate]: (previous[menuDate] || []).filter(item => !item.id.startsWith(`custom-${id.slice(7)}-`)) }));
+    const overrides = readCalorieOverrides();
+    Object.keys(overrides).filter(key => key.startsWith(`${menuDate}:custom-${id.slice(7)}-`)).forEach(key => delete overrides[key]);
+    try { window.localStorage.setItem(CALORIE_OVERRIDES_KEY, JSON.stringify(overrides)); } catch { setNotice("식단은 삭제했지만 일부 칼로리 수정값을 정리하지 못했어요."); return; }
+    setNotice("직접 등록한 식단을 삭제했어요.");
+  }
+
+  function updateTarget(value: string) {
+    setTarget(value);
+    if (value !== "직접 설정") setTargetKcal(value === "다이어트" ? 1550 : value === "벌크업" ? 2500 : 2000);
   }
 
   function clearLocalData() {
@@ -351,7 +406,7 @@ export default function Home() {
       window.localStorage.removeItem(LOCAL_DATA_KEY);
       window.localStorage.removeItem(CALORIE_OVERRIDES_KEY);
     } catch { setNotice("브라우저 저장소에 접근하지 못해 데이터를 삭제할 수 없어요."); return; }
-    setRecordsByDate({}); setVotes({}); setTarget("유지");
+    setRecordsByDate({}); setVotes({}); setTarget("유지"); setTargetKcal(2000);
     setPreferredCategories([]); setAllergies([]); setDislikedIngredients(""); setUploads([]);
     setMeals(previous => previous.filter(meal => !meal.id.startsWith("upload-")).map(meal => ({ ...meal, menu: meal.menu.map(menu => ({ ...menu, ...estimateCalories(menu.name) })) })));
     setNotice("이 기기에 저장된 내 데이터를 삭제했어요.");
@@ -365,7 +420,6 @@ export default function Home() {
           <span>오늘 뭐먹지?</span>
         </button>
         <div className="top-actions">
-          <button className="icon-button" onClick={() => setNotice("알림이 없어요. 점심 메뉴가 업데이트되면 알려드릴게요.")} aria-label="알림">♧</button>
           <button className="login-shortcut" onClick={() => setView("profile")} aria-label="내 기기 저장 설정 열기">내 설정</button>
         </div>
       </header>
@@ -384,7 +438,7 @@ export default function Home() {
           total={todayTotal}
           unknownSelected={unknownSelected}
           progress={progress}
-          target={target}
+          targetKcal={targetKcal}
           votes={votes}
           preferredCategories={preferredCategories}
           allergies={allergies}
@@ -394,6 +448,8 @@ export default function Home() {
           setView={setView}
           syncState={syncState}
           menuDate={menuDate}
+          setMenuDate={changeDate}
+          onRemoveUpload={removeUpload}
           editingMenu={editingMenu}
           editValue={editValue}
           setEditValue={setEditValue}
@@ -402,32 +458,33 @@ export default function Home() {
           onSaveCalories={saveCalories}
           onResetCalories={resetCalories}
         />}
-        {view === "upload" && <UploadView onComplete={addUploadedMeal} />}
-        {view === "records" && <RecordsView recordsByDate={recordsByDate} menuDate={menuDate} onRemove={removeRecord} />}
-        {view === "profile" && <ProfileView target={target} setTarget={setTarget} preferredCategories={preferredCategories} setPreferredCategories={setPreferredCategories} allergies={allergies} setAllergies={setAllergies} dislikedIngredients={dislikedIngredients} setDislikedIngredients={setDislikedIngredients} onClearData={clearLocalData} onAdmin={() => setShowAdmin(true)} />}
+        {view === "upload" && <UploadView defaultDate={menuDate} defaultTime={mealType} onComplete={addUploadedMeal} />}
+        {view === "records" && <RecordsView recordsByDate={recordsByDate} onRemove={removeRecord} />}
+        {view === "profile" && <ProfileView target={target} setTarget={updateTarget} targetKcal={targetKcal} setTargetKcal={setTargetKcal} preferredCategories={preferredCategories} setPreferredCategories={setPreferredCategories} allergies={allergies} setAllergies={setAllergies} dislikedIngredients={dislikedIngredients} setDislikedIngredients={setDislikedIngredients} onClearData={clearLocalData} />}
       </section>
 
       <nav className="bottom-nav" aria-label="주요 메뉴">
         {tabItems.map((item) => <button key={item.id} className={view === item.id ? "active" : ""} onClick={() => setView(item.id)}><span>{item.icon}</span>{item.label}</button>)}
       </nav>
-      {showAdmin && <AdminSheet onClose={() => setShowAdmin(false)} />}
     </main>
   );
 }
 
-function HomeView({ meals, allMeals, cafeteria, setCafeteria, mealType, setMealType, selected, toggleSelection, total, unknownSelected, progress, target, votes, preferredCategories, allergies, dislikedIngredients, recordsByDate, onVote, setView, syncState, menuDate, editingMenu, editValue, setEditValue, onEdit, onCancelEdit, onSaveCalories, onResetCalories }: {
-  meals: Meal[]; allMeals: Meal[]; cafeteria: string; setCafeteria: (value: string) => void; mealType: Meal["time"]; setMealType: (value: Meal["time"]) => void; selected: string[]; toggleSelection: (id: string) => void; total: number; unknownSelected: number; progress: number; target: string; votes: Record<string, "like" | "dislike">; preferredCategories: string[]; allergies: string[]; dislikedIngredients: string; recordsByDate: Record<string, MealRecord[]>; onVote: (id: string, value: "like" | "dislike") => void; setView: (view: string) => void; syncState: "loading" | "live" | "fallback"; menuDate: string; editingMenu: string | null; editValue: string; setEditValue: (value: string) => void; onEdit: (menu: Menu) => void; onCancelEdit: () => void; onSaveCalories: (id: string) => void; onResetCalories: (id: string) => void;
+function HomeView({ meals, allMeals, cafeteria, setCafeteria, mealType, setMealType, selected, toggleSelection, total, unknownSelected, progress, targetKcal, votes, preferredCategories, allergies, dislikedIngredients, recordsByDate, onVote, setView, syncState, menuDate, setMenuDate, onRemoveUpload, editingMenu, editValue, setEditValue, onEdit, onCancelEdit, onSaveCalories, onResetCalories }: {
+  meals: Meal[]; allMeals: Meal[]; cafeteria: string; setCafeteria: (value: string) => void; mealType: Meal["time"]; setMealType: (value: Meal["time"]) => void; selected: string[]; toggleSelection: (id: string) => void; total: number; unknownSelected: number; progress: number; targetKcal: number; votes: Record<string, "like" | "dislike">; preferredCategories: string[]; allergies: string[]; dislikedIngredients: string; recordsByDate: Record<string, MealRecord[]>; onVote: (id: string, value: "like" | "dislike") => void; setView: (view: string) => void; syncState: "loading" | "live" | "fallback" | "empty" | "error"; menuDate: string; setMenuDate: (date: string) => void; onRemoveUpload: (id: string) => void; editingMenu: string | null; editValue: string; setEditValue: (value: string) => void; onEdit: (menu: Menu) => void; onCancelEdit: () => void; onSaveCalories: (id: string) => void; onResetCalories: (id: string) => void;
 }) {
+  const [query, setQuery] = useState("");
+  const visibleMeals = query.trim() ? meals.map(meal => ({ ...meal, menu: meal.menu.filter(menu => menu.name.toLowerCase().includes(query.trim().toLowerCase()) || meal.cafeteria.toLowerCase().includes(query.trim().toLowerCase())) })).filter(meal => meal.menu.length) : meals;
   const relevantMeals = allMeals.filter((meal) => meal.time === mealType);
   const avoidTerms = [...allergies.flatMap(item => ALLERGY_NAME_HINTS[item] || [item]), ...dislikedIngredients.split(/[,\n]/).map(item => item.trim()).filter(Boolean)];
   const history = Object.values(recordsByDate).flat();
-  const candidateMeals = relevantMeals.length ? relevantMeals : allMeals;
-  const candidates = candidateMeals.flatMap(meal => meal.menu).filter(menu => menu.kcal !== null && votes[menu.id] !== "dislike" && !avoidTerms.some(term => menu.name.includes(term)));
-  const mealTarget = target === "다이어트" ? 500 : target === "벌크업" ? 900 : 700;
+  const voteFor = (menu: Menu) => votes[`name:${menu.name.trim().toLowerCase()}`] || votes[menu.id];
+  const candidates = relevantMeals.flatMap(meal => meal.menu).filter(menu => menu.kcal !== null && voteFor(menu) !== "dislike" && !avoidTerms.some(term => menu.name.includes(term)));
+  const mealTarget = Math.round(targetKcal / 3);
   const recommendation = candidates.sort((first, second) => {
     const rank = (menu: Menu) => menu.score * 8 + Math.log1p(menu.votes) * 3
       + (preferredCategories.includes(menu.category) ? 22 : 0)
-      + (votes[menu.id] === "like" ? 26 : votes[menu.id] === "dislike" ? -35 : 0)
+      + (voteFor(menu) === "like" ? 26 : voteFor(menu) === "dislike" ? -35 : 0)
       + Math.min(3, history.filter(item => item.name === menu.name).length) * 8
       + Math.max(0, 18 - Math.abs((menu.kcal || 0) - mealTarget) / 30);
     return rank(second) - rank(first);
@@ -436,98 +493,129 @@ function HomeView({ meals, allMeals, cafeteria, setCafeteria, mealType, setMealT
   const hasPersonalData = history.length > 0 || Object.keys(votes).length > 0 || preferredCategories.length > 0;
   const reason = recommendation ? [
     preferredCategories.includes(recommendation.category) ? `선호하는 ${recommendation.category} 메뉴` : "",
-    votes[recommendation.id] === "like" ? "좋게 평가한 메뉴" : "",
+    voteFor(recommendation) === "like" ? "관심 표시한 메뉴" : "",
     history.some(item => item.name === recommendation.name) ? "이전에 선택한 메뉴" : "",
     recommendation.score >= 4 ? "식샤 평점이 높은 메뉴" : "",
-    `${target} 목표 칼로리 고려`
+    `하루 ${targetKcal.toLocaleString("ko-KR")} kcal 목표 고려`
   ].filter(Boolean).slice(0, 2).join(" · ") : "";
+  const isFuture = menuDate > todayInSeoul();
   return <>
     <section className="hero">
       <p className="eyebrow">{dateLabel(menuDate)} · {mealType}</p>
-      <h1>오늘, <em>무엇을 먹을까요?</em></h1>
-      <p className="hero-copy">내 취향과 오늘의 칼로리 목표를 반영한<br />학식 추천을 확인해 보세요.</p>
-      <div className="date-switcher"><button aria-label="어제">‹</button><strong>오늘</strong><button aria-label="내일">›</button></div>
+      <h1>{relativeDateLabel(menuDate)}, <em>무엇을 먹을까요?</em></h1>
+      <p className="hero-copy">날짜를 바꾸면 해당 날짜에 등록된 식샤 식단을 불러와요.</p>
+      <div className="date-switcher"><button onClick={() => setMenuDate(shiftDate(menuDate, -1))} aria-label="전날 식단">‹</button><strong>{relativeDateLabel(menuDate)}</strong><button onClick={() => setMenuDate(shiftDate(menuDate, 1))} aria-label="다음 날 식단">›</button></div>
+      <label className="date-input">날짜 직접 선택 <input type="date" value={menuDate} onChange={event => { if (event.target.value) setMenuDate(event.target.value); }} /></label>
+      {menuDate !== todayInSeoul() && <button className="today-shortcut" onClick={() => setMenuDate(todayInSeoul())}>오늘로 돌아가기</button>}
     </section>
 
     <section className="recommend-card">
-      <div className="recommend-top"><span className="sparkle">✦</span><span>오늘의 맞춤 추천</span><span className="match">{hasPersonalData ? "내 기록 반영" : "인기 기반"}</span></div>
+      <div className="recommend-top"><span className="sparkle">✦</span><span>{relativeDateLabel(menuDate)}의 추천</span><span className="match">{hasPersonalData ? "내 기록 반영" : "식샤 인기 기반"}</span></div>
       {recommendation ? <><div className="recommend-content">
         <div><p className="restaurant">{recommendationRestaurant?.cafeteria || "식샤 연동 식당"}</p><h2>{recommendation.name}</h2><p className="why">{reason}</p></div>
-        <div className="food-emoji">🍝</div>
+        <div className="food-emoji">{recommendationRestaurant?.emoji || "🍽️"}</div>
       </div>
       <div className="recommend-footer"><span>{recommendation.score ? <>★ {recommendation.score.toFixed(1)} <small>({recommendation.votes}명)</small></> : "신규 메뉴"}</span><span>{formatKcal(recommendation.kcal)} · {recommendation.confidence === "직접 입력" ? "직접 입력" : "추정치"}</span></div>
-      <div className="vote-row"><span>이 추천, 마음에 드나요?</span><button className={votes[recommendation.id] === "like" ? "selected-vote" : ""} onClick={() => onVote(recommendation.id, "like")}>👍 맛있어 보여요</button><button className={votes[recommendation.id] === "dislike" ? "selected-vote" : ""} onClick={() => onVote(recommendation.id, "dislike")}>👎 별로예요</button></div></> : <p className="recommend-empty">조건에 맞는 칼로리 확인 메뉴가 없어요. 식단이나 제외 식재료를 확인해 주세요.</p>}
+      <div className="vote-row"><span>추천 취향에 반영</span><button aria-pressed={voteFor(recommendation) === "like"} className={voteFor(recommendation) === "like" ? "selected-vote" : ""} onClick={() => onVote(recommendation.id, "like")}>👍 관심 있어요</button><button aria-pressed={voteFor(recommendation) === "dislike"} className={voteFor(recommendation) === "dislike" ? "selected-vote" : ""} onClick={() => onVote(recommendation.id, "dislike")}>👎 관심 없어요</button></div></> : <p className="recommend-empty">{syncState === "loading" ? "식단을 불러오고 있어요." : "이 끼니에 추천할 메뉴가 없어요. 다른 끼니를 보거나 제외 재료를 확인해 주세요."}</p>}
     </section>
 
     <section className="calorie-card">
-      <div><p>오늘 선택한 메뉴</p><strong>{formatKcal(total)}</strong><span> / {target === "다이어트" ? "1,550" : target === "벌크업" ? "2,500" : "2,000"} kcal</span></div>
+      <div><p>{relativeDateLabel(menuDate)} 먹은 메뉴 기록</p><strong>{formatKcal(total)}</strong><span> / 하루 목표 {targetKcal.toLocaleString("ko-KR")} kcal</span></div>
       <div className="ring" style={{ "--progress": `${progress * 3.6}deg` } as React.CSSProperties}><b>{progress}%</b></div>
       <div className="bar"><i style={{ width: `${progress}%` }} /></div>
-      <p className="calorie-caption">선택한 메뉴를 눌러 합계에 추가하거나 뺄 수 있어요.{unknownSelected > 0 && ` 칼로리 미확인 ${unknownSelected}개는 합계에서 제외됐어요.`}</p>
+      <p className="calorie-caption">{isFuture ? "미래 날짜는 식사 기록을 남길 수 없어요." : "아래 메뉴의 '먹었어요'를 누르면 이 날짜의 섭취 기록과 합계에 반영돼요. 식사 전체를 기록해야 하루 합계가 정확해집니다."}{unknownSelected > 0 && ` 칼로리 미확인 ${unknownSelected}개는 합계에서 제외됐어요.`}</p>
     </section>
 
-    <section className="meal-heading"><div><p className="eyebrow">오늘의 식단</p><h2>어디서 먹을까요?</h2></div><button onClick={() => setView("upload")}>식단 등록 <span>＋</span></button></section>
-    <div className={`sync-status ${syncState}`}><span>{syncState === "live" ? "●" : syncState === "loading" ? "◌" : "!"}</span>{syncState === "live" ? `식샤 실시간 연동 · ${allMeals.length}개 식당 메뉴` : syncState === "loading" ? "식샤 식단을 불러오는 중" : "식샤 연결이 지연되어 예시 식단을 표시 중"}<small>{syncState === "live" ? "10분마다 갱신" : ""}</small></div>
+    <section className="meal-heading"><div><p className="eyebrow">{dateLabel(menuDate)} 식단</p><h2>어디서 먹을까요?</h2></div><button onClick={() => setView("upload")}>빠진 식단 직접 등록 <span>＋</span></button></section>
+    <div className={`sync-status ${syncState}`}><span>{syncState === "live" ? "●" : syncState === "loading" ? "◌" : "!"}</span>{syncState === "live" ? `식샤 연동 · ${new Set(allMeals.filter(meal => !meal.id.startsWith("upload-")).map(meal => meal.cafeteria)).size}개 식당` : syncState === "loading" ? "식샤 식단을 불러오는 중" : syncState === "fallback" ? "식샤 연결 실패 · 오늘의 예시 식단 표시 중" : syncState === "empty" ? "식샤에 이 날짜의 등록 메뉴가 없어요" : "식샤 연결 실패 · 이 날짜의 식단을 불러오지 못했어요"}<small>{syncState === "live" ? "10분마다 갱신" : ""}</small></div>
     <div className="filter-row">
       {['전체 식당', ...allMeals.map((meal) => meal.cafeteria)].filter((item, index, items) => items.indexOf(item) === index).map((item) => <button className={cafeteria === item ? "chosen" : ""} key={item} onClick={() => setCafeteria(item)}>{item}</button>)}
     </div>
     <div className="time-tabs three"><button className={mealType === "조식" ? "active" : ""} onClick={() => setMealType("조식")}>조식</button><button className={mealType === "중식" ? "active" : ""} onClick={() => setMealType("중식")}>중식</button><button className={mealType === "석식" ? "active" : ""} onClick={() => setMealType("석식")}>석식</button></div>
+    <label className="menu-search">식당·메뉴 검색<input type="search" value={query} onChange={event => setQuery(event.target.value)} placeholder="예: 제육볶음, 학생회관" /></label>
     <div className="meal-list">
-      {meals.map((meal) => <article className="meal-card" key={meal.id}>
-        <div className="meal-title"><div className="meal-icon">{meal.emoji}</div><div><h3>{meal.cafeteria}</h3><p>{meal.location} · {meal.time}</p></div><button className="more" aria-label={`${meal.cafeteria} 상세 보기`}>···</button></div>
+      {visibleMeals.map((meal) => <article className="meal-card" key={meal.id}>
+        <div className="meal-title"><div className="meal-icon">{meal.emoji}</div><div><h3>{meal.cafeteria}</h3><p>{meal.location} · {meal.time}</p></div>{meal.id.startsWith("upload-") && <button className="record-remove" onClick={() => onRemoveUpload(meal.id)} aria-label={`${meal.cafeteria} 직접 등록 식단 삭제`}>삭제</button>}</div>
         <div className="menu-list">{meal.menu.map((menu) => <div className="menu-entry" key={menu.id}>
-          <div className="menu-entry-top"><button className={`menu-item ${selected.includes(menu.id) ? "checked" : ""}`} onClick={() => toggleSelection(menu.id)}>
-            <span className="check">{selected.includes(menu.id) ? "✓" : ""}</span><span className="menu-name">{menu.name}<small>{menu.tags.map(tag => <i key={tag}>{tag}</i>)}</small></span><span className="menu-meta"><b>{formatKcal(menu.kcal)}</b><small>{menu.price ? `${menu.price.toLocaleString("ko-KR")}원 · ` : ""}{menu.confidence === "직접 입력" ? "직접 입력" : `${menu.confidence} 신뢰도`}</small></span>
-          </button><button className="calorie-edit-button" onClick={() => onEdit(menu)} aria-label={`${menu.name} 칼로리 수정`}>수정</button></div>
+          <div className="menu-entry-top"><div className="menu-item"><span className="menu-name">{menu.name}<small>{menu.tags.map(tag => <i key={tag}>{tag}</i>)}</small></span><span className="menu-meta"><b>{formatKcal(menu.kcal)}</b><small>{menu.price ? `${menu.price.toLocaleString("ko-KR")}원 · ` : ""}{menu.confidence === "직접 입력" ? "직접 입력" : `${menu.confidence} 신뢰도`}</small>{menu.votes > 0 && <small>★ {menu.score.toFixed(1)} · 식샤 {menu.votes}명 평가</small>}</span></div></div>
           <p className="calorie-basis">{menu.low != null && menu.high != null && menu.confidence !== "직접 입력" ? `예상 ${menu.low.toLocaleString("ko-KR")}~${menu.high.toLocaleString("ko-KR")} kcal · ` : ""}{menu.basis || "예시 식단의 칼로리 추정치"}{menu.sourceUrl && <> · <a href={menu.sourceUrl} target="_blank" rel="noopener noreferrer">참고 자료</a></>}</p>
+          <div className="menu-actions"><button disabled={isFuture} aria-pressed={selected.includes(menu.id)} className={selected.includes(menu.id) ? "logged" : ""} onClick={() => toggleSelection(menu.id)}>{selected.includes(menu.id) ? "✓ 먹은 기록 취소" : "＋ 먹었어요"}</button><button onClick={() => onEdit(menu)} aria-label={`${menu.name} 칼로리 수정`}>칼로리 수정</button><button aria-pressed={voteFor(menu) === "like"} onClick={() => onVote(menu.id, "like")}>👍{voteFor(menu) === "like" ? " 관심 표시됨" : " 관심"}</button><button aria-pressed={voteFor(menu) === "dislike"} onClick={() => onVote(menu.id, "dislike")}>👎{voteFor(menu) === "dislike" ? " 제외됨" : " 제외"}</button></div>
           {editingMenu === menu.id && <div className="calorie-editor"><label>확인한 칼로리 (kcal)<input type="number" min="1" max="5000" inputMode="numeric" value={editValue} onChange={event => setEditValue(event.target.value)} /></label><button onClick={() => onSaveCalories(menu.id)}>저장</button><button onClick={() => onResetCalories(menu.id)}>추정치로 되돌리기</button><button onClick={onCancelEdit}>취소</button></div>}
         </div>)}</div>
-        <div className="meal-bottom"><span>{meal.menu[0].score ? <>★ {meal.menu[0].score.toFixed(1)} <small>{meal.menu[0].votes}명 평가</small></> : "식샤 등록 메뉴"}</span><button>상세 보기 ›</button></div>
       </article>)}
-      {!meals.length && <div className="empty"><span>🍽️</span><h3>등록된 식단이 없어요</h3><p>직접 입력하거나 이미지로 식단을 등록해 보세요.</p></div>}
+      {!visibleMeals.length && <div className="empty"><span>🍽️</span><h3>{syncState === "loading" ? "식단을 불러오는 중" : "표시할 식단이 없어요"}</h3><p>{query ? "검색어를 바꾸거나 지워 주세요." : syncState === "error" ? "식샤 연결 상태를 확인하거나 나중에 다시 시도해 주세요." : "다른 날짜·끼니·식당을 선택하거나 빠진 식단을 직접 등록해 주세요."}</p><button onClick={() => setView("upload")}>식단 직접 등록</button></div>}
     </div>
   </>;
 }
 
-function UploadView({ onComplete }: { onComplete: (name: string, menu: string) => void }) {
-  const [mode, setMode] = useState<"text" | "image">("text");
-  const [name, setName] = useState("학생회관 식당");
-  const [text, setText] = useState("비빔밥\n미소된장국\n닭강정\n깍두기");
-  const [fileName, setFileName] = useState("");
-  const [parsed, setParsed] = useState(false);
-  function onFile(event: ChangeEvent<HTMLInputElement>) { const file = event.target.files?.[0]; if (file) { setFileName(file.name); setParsed(false); } }
-  return <section className="form-page"><p className="eyebrow">식단 데이터 등록</p><h1>오늘의 식단을<br /><em>함께 채워 주세요.</em></h1><p className="subcopy">마이스누 식단을 붙여넣어 저장하거나 이미지 등록 흐름을 데모로 체험해 보세요.</p>
-    <div className="segmented"><button className={mode === "text" ? "active" : ""} onClick={() => setMode("text")}>텍스트 붙여넣기</button><button className={mode === "image" ? "active" : ""} onClick={() => setMode("image")}>이미지 OCR 데모</button></div>
-    <label className="field"><span>식당 이름</span><input value={name} onChange={e => setName(e.target.value)} placeholder="예: 학생회관 식당" /></label>
-    {mode === "text" ? <label className="field"><span>식단 메뉴 <small>줄바꿈 또는 쉼표로 구분</small></span><textarea value={text} onChange={e => setText(e.target.value)} rows={7} /></label> : <div className="upload-zone"><input id="menu-image" type="file" accept="image/*" onChange={onFile} /><label htmlFor="menu-image"><strong>▧</strong><b>{fileName || "식단 이미지 선택"}</b><span>이미지 분석은 아직 연결되지 않았어요. 데모 메뉴로 저장 흐름을 체험할 수 있습니다.</span></label>{fileName && <button className="scan" onClick={() => { setParsed(true); setText("김치볶음밥\n계란후라이\n유부장국\n단무지"); }}>데모 메뉴 불러오기</button>}{parsed && <div className="ocr-result">✓ 데모 메뉴를 불러왔어요. 실제 이미지에서 읽은 결과가 아니므로 수정해 주세요.</div>}</div>}
-    {mode === "image" && parsed && <label className="field"><span>OCR 추출 결과 <small>수정 가능</small></span><textarea value={text} onChange={e => setText(e.target.value)} rows={5} /></label>}
-    <div className="privacy-note">🔒 등록한 식단과 수정한 메뉴 텍스트는 이 기기에만 저장됩니다. 이미지는 저장·전송되지 않으며 OCR은 현재 데모입니다.</div>
-    <button className="primary-button" disabled={mode === "image" && !parsed} onClick={() => onComplete(name, text)}>식단 등록하고 칼로리 계산하기 <span>→</span></button>
+function UploadView({ defaultDate, defaultTime, onComplete }: { defaultDate: string; defaultTime: Meal["time"]; onComplete: (name: string, menu: string, date: string, time: Meal["time"]) => void }) {
+  const [name, setName] = useState("");
+  const [date, setDate] = useState(defaultDate);
+  const [time, setTime] = useState<Meal["time"]>(defaultTime);
+  const [text, setText] = useState("");
+  const [file, setFile] = useState<File | null>(null);
+  const [ocrState, setOcrState] = useState<"idle" | "working" | "done" | "error">("idle");
+
+  async function readImage() {
+    if (!file) return;
+    setOcrState("working");
+    let worker: Awaited<ReturnType<typeof import("tesseract.js")["createWorker"]>> | null = null;
+    try {
+      const { createWorker } = await import("tesseract.js");
+      worker = await createWorker(["kor", "eng"]);
+      const result = await worker.recognize(file);
+      const cleaned = cleanOcrText(result.data.text);
+      setText(cleaned || result.data.text.trim());
+      setOcrState(result.data.text.trim() ? "done" : "error");
+    } catch {
+      setOcrState("error");
+    } finally {
+      try { await worker?.terminate(); } catch { /* OCR result remains available. */ }
+    }
+  }
+
+  return <section className="form-page"><p className="eyebrow">빠진 식단 직접 등록</p><h1>식단을 <em>직접 추가해요.</em></h1><p className="subcopy">① 날짜·식당·끼니를 고르고 ② 메뉴를 한 줄씩 입력한 뒤 ③ 아래 등록 버튼을 누르세요. 등록 결과는 선택한 날짜에만, 이 기기에만 표시됩니다.</p>
+    <label className="field"><span>식단 날짜</span><input type="date" value={date} onChange={event => setDate(event.target.value)} /></label>
+    <label className="field"><span>식당 이름</span><input value={name} onChange={event => setName(event.target.value)} placeholder="예: 학생회관 식당" /></label>
+    <label className="field"><span>끼니</span><select value={time} onChange={event => setTime(event.target.value as Meal["time"])}><option>조식</option><option>중식</option><option>석식</option></select></label>
+    <section className="upload-zone"><label htmlFor="menu-image"><strong>▧</strong><b>{file?.name || "식단 사진이 있다면 선택"}</b><span>이미지의 글자를 이 기기에서 읽어 아래 입력란에 채웁니다.</span></label><input id="menu-image" type="file" accept="image/*" onChange={event => { const next = event.target.files?.[0] || null; setFile(next && next.size <= 8_000_000 ? next : null); setOcrState(next && next.size > 8_000_000 ? "error" : "idle"); }} />{file && <button className="scan" disabled={ocrState === "working"} onClick={readImage}>{ocrState === "working" ? "한글 글자 인식 중…" : "사진에서 글자 읽기"}</button>}{ocrState === "done" && <p className="ocr-result">글자를 읽었습니다. 메뉴 이외의 글자를 지우고 이름·날짜·끼니를 꼭 확인해 주세요.</p>}{ocrState === "error" && <p className="ocr-error">사진을 읽지 못했어요. 8MB 이하의 선명한 이미지를 선택하거나 메뉴를 직접 입력해 주세요.</p>}</section>
+    <label className="field"><span>메뉴 <small>한 줄에 한 메뉴, 최대 30개 · OCR 결과 수정 가능</small></span><textarea value={text} onChange={event => setText(event.target.value)} rows={7} placeholder={"예: 비빔밥\n미소된장국\n닭강정"} /></label>
+    <div className="privacy-note">🔒 메뉴와 설정만 브라우저에 저장됩니다. 사진은 서버에 업로드하거나 저장하지 않지만, 글자 인식용 언어 파일을 처음 사용할 때 인터넷 연결이 필요합니다. 칼로리는 등록 후 추정치로 표시됩니다.</div>
+    <button className="primary-button" disabled={!date || !text.trim() || ocrState === "working"} onClick={() => onComplete(name, text, date, time)}>이 날짜에 식단 등록 <span>→</span></button>
   </section>;
 }
 
-function RecordsView({ recordsByDate, menuDate, onRemove }: { recordsByDate: Record<string, MealRecord[]>; menuDate: string; onRemove: (date: string, id: string) => void }) {
+function RecordsView({ recordsByDate, onRemove }: { recordsByDate: Record<string, MealRecord[]>; onRemove: (date: string, id: string) => void }) {
   const dates = Object.keys(recordsByDate).filter(date => recordsByDate[date]?.length).sort((a, b) => b.localeCompare(a));
-  const today = recordsByDate[menuDate] || [];
+  const today = (recordsByDate[todayInSeoul()] || []).filter(item => item.confirmed === true);
   const todayTotal = today.reduce((sum, item) => sum + (item.kcal || 0), 0);
-  return <section className="form-page records"><p className="eyebrow">나의 식사 기록</p><h1>기기에 남긴 <em>식사 기록</em></h1><p className="subcopy">메뉴를 선택하면 날짜별로 이 브라우저에 저장돼요. 선택은 실제 섭취를 확인한 기록이 아니에요.</p>
-    <div className="record-summary"><p>오늘 선택한 메뉴 <b>{today.length}개</b></p><strong>{formatKcal(todayTotal)}</strong></div>
-    {dates.length ? dates.map(date => <section className="record-day" key={date}><h2>{date === menuDate ? "오늘" : dateLabel(date)} <small>{recordsByDate[date].length}개 · {formatKcal(recordsByDate[date].reduce((sum, item) => sum + (item.kcal || 0), 0))}</small></h2><div className="record-list">{recordsByDate[date].map(item => <div key={item.id}><span className="mini-check">✓</span><p>{item.name}<small>{item.cafeteria} · {item.category}</small></p><b>{formatKcal(item.kcal)}</b><button className="record-remove" onClick={() => onRemove(date, item.id)} aria-label={`${item.name} 선택 기록 삭제`}>삭제</button></div>)}</div></section>) : <div className="empty"><span>◷</span><h3>저장된 기록이 없어요</h3><p>오늘의 식단에서 메뉴를 선택해 보세요.</p></div>}
+  return <section className="form-page records"><p className="eyebrow">나의 식사 기록</p><h1>기기에 남긴 <em>식사 기록</em></h1><p className="subcopy">식단에서 실제 먹은 메뉴의 ‘먹었어요’를 누르면 날짜별로 저장됩니다. 이전 버전의 단순 선택 기록은 ‘섭취 미확인’으로 남기고 칼로리 합계에서 제외합니다.</p>
+    <div className="record-summary"><p>오늘 먹었다고 기록한 메뉴 <b>{today.length}개</b></p><strong>{formatKcal(todayTotal)}</strong></div>
+    {dates.length ? dates.map(date => <section className="record-day" key={date}><h2>{date === todayInSeoul() ? "오늘" : dateLabel(date)} <small>섭취 확인 {recordsByDate[date].filter(item => item.confirmed === true).length}개 · {formatKcal(recordsByDate[date].filter(item => item.confirmed === true).reduce((sum, item) => sum + (item.kcal || 0), 0))}</small></h2><div className="record-list">{recordsByDate[date].map(item => <div key={item.id}><span className="mini-check">{item.confirmed ? "✓" : "?"}</span><p>{item.name}<small>{item.cafeteria} · {item.category}{!item.confirmed && " · 이전 선택(섭취 미확인)"}</small></p><b>{item.confirmed ? formatKcal(item.kcal) : "합계 제외"}</b><button className="record-remove" onClick={() => onRemove(date, item.id)} aria-label={`${item.name} 기록 삭제`}>삭제</button></div>)}</div></section>) : <div className="empty"><span>◷</span><h3>저장된 기록이 없어요</h3><p>오늘 또는 지난 날짜의 식단에서 먹은 메뉴를 기록해 보세요.</p></div>}
   </section>;
 }
 
-function ProfileView({ target, setTarget, preferredCategories, setPreferredCategories, allergies, setAllergies, dislikedIngredients, setDislikedIngredients, onClearData, onAdmin }: {
-  target: string; setTarget: (value: string) => void; preferredCategories: string[]; setPreferredCategories: (value: string[]) => void; allergies: string[]; setAllergies: (value: string[]) => void; dislikedIngredients: string; setDislikedIngredients: (value: string) => void; onClearData: () => void; onAdmin: () => void;
+function ProfileView({ target, setTarget, targetKcal, setTargetKcal, preferredCategories, setPreferredCategories, allergies, setAllergies, dislikedIngredients, setDislikedIngredients, onClearData }: {
+  target: string; setTarget: (value: string) => void; targetKcal: number; setTargetKcal: (value: number) => void; preferredCategories: string[]; setPreferredCategories: (value: string[]) => void; allergies: string[]; setAllergies: (value: string[]) => void; dislikedIngredients: string; setDislikedIngredients: (value: string) => void; onClearData: () => void;
 }) {
   const toggle = (items: string[], value: string) => items.includes(value) ? items.filter(item => item !== value) : [...items, value];
+  const [targetInput, setTargetInput] = useState(String(targetKcal));
+  useEffect(() => setTargetInput(String(targetKcal)), [targetKcal]);
+  function commitTarget() {
+    const value = Number(targetInput);
+    if (Number.isFinite(value) && value >= 500 && value <= 5000) {
+      setTarget("직접 설정");
+      setTargetKcal(Math.round(value));
+      setTargetInput(String(Math.round(value)));
+    } else setTargetInput(String(targetKcal));
+  }
   return <section className="form-page profile"><p className="eyebrow">내 식단 설정</p><h1>취향을 알수록<br /><em>추천은 더 정확해져요.</em></h1>
     <section className="local-card"><strong>이 기기에만 저장돼요</strong><p>로그인 없이 이 브라우저에 투표, 선택 기록, 설정, 직접 등록한 식단을 저장합니다. 다른 기기와 동기화되지 않으며 브라우저 데이터를 지우면 기록도 사라집니다.</p></section>
-    <label className="field"><span>칼로리 목표</span><select value={target} onChange={e => setTarget(e.target.value)}><option>다이어트</option><option>유지</option><option>벌크업</option></select></label>
+    <label className="field"><span>목표 유형</span><select value={target} onChange={e => setTarget(e.target.value)}><option>다이어트</option><option>유지</option><option>벌크업</option><option>직접 설정</option></select></label>
+    <label className="field"><span>하루 목표 칼로리 (kcal)</span><input type="number" min="500" max="5000" step="50" inputMode="numeric" value={targetInput} onChange={event => setTargetInput(event.target.value)} onBlur={commitTarget} onKeyDown={event => { if (event.key === "Enter") event.currentTarget.blur(); }} /><small className="field-hint">500~5,000 kcal 범위에서 직접 바꾸고 입력칸을 벗어나면 저장돼요. 범위 밖 값은 이전 값으로 돌아갑니다. 의학적 권장량은 아닙니다.</small></label>
     <div className="preference"><span>선호 식단</span><div>{CATEGORY_OPTIONS.map(item => <button key={item} className={preferredCategories.includes(item) ? "chosen" : ""} aria-pressed={preferredCategories.includes(item)} onClick={() => setPreferredCategories(toggle(preferredCategories, item))}>{item}</button>)}</div></div>
     <div className="preference"><span>알레르기 또는 제외할 재료</span><div>{ALLERGY_OPTIONS.map(item => <button key={item} className={allergies.includes(item) ? "chosen" : ""} aria-pressed={allergies.includes(item)} onClick={() => setAllergies(toggle(allergies, item))}>{item}</button>)}</div><p className="preference-help">메뉴 이름에 표시된 재료만 추천에서 제외할 수 있습니다. 실제 알레르기 안전 여부는 식당에 꼭 확인해 주세요.</p></div>
     <label className="field"><span>그 밖에 피하고 싶은 재료 <small>쉼표로 구분</small></span><input value={dislikedIngredients} onChange={e => setDislikedIngredients(e.target.value)} placeholder="예: 버섯, 오이" /></label>
-    <section className="privacy-card"><strong>내 기기 데이터</strong><p>저장된 투표, 선택 기록, 설정, 직접 등록한 식단, 칼로리 수정값을 한 번에 삭제할 수 있습니다. 삭제 후 복구할 수 없어요.</p><button onClick={onClearData}>내 데이터 모두 삭제</button></section><button className="admin-link" onClick={onAdmin}>관리자 식단 검수 화면 열기 →</button>
+    <section className="privacy-card"><strong>내 기기 데이터</strong><p>저장된 투표, 식사 기록, 설정, 직접 등록한 식단, 칼로리 수정값을 한 번에 삭제할 수 있습니다. 삭제 후 복구할 수 없어요.</p><button onClick={onClearData}>내 데이터 모두 삭제</button></section>
   </section>;
 }
-
-function AdminSheet({ onClose }: { onClose: () => void }) { return <div className="modal-backdrop"><section className="admin-sheet"><button className="close" onClick={onClose}>×</button><p className="eyebrow">관리자 · 검수 대기</p><h2>새 식단 3건</h2><div className="pending"><div><span>학생회관 식당</span><b>메뉴 OCR 신뢰도 78%</b></div><p>김치볶음밥 · 계란후라이 · 유부장국</p><button>검수 시작</button></div><div className="pending"><div><span>기숙사 식당</span><b>칼로리 미입력 2개</b></div><p>닭갈비 · 현미밥 · 콘샐러드</p><button>검수 시작</button></div></section></div>; }
