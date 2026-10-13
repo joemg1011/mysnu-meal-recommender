@@ -17,6 +17,9 @@ type Menu = {
   high?: number | null;
   basis?: string;
   sourceUrl?: string;
+  perBasisKcal?: number;
+  basisAmount?: number;
+  amountUnit?: string;
   price?: number;
 };
 
@@ -126,6 +129,7 @@ const initialMeals: Meal[] = [
 const tabItems = [
   { id: "home", label: "홈", icon: "⌂" },
   { id: "upload", label: "식단 등록", icon: "＋" },
+  { id: "chat", label: "AI 상담", icon: "✦" },
   { id: "records", label: "내 기록", icon: "◷" },
   { id: "profile", label: "내 설정", icon: "♙" }
 ];
@@ -211,14 +215,17 @@ export default function Home() {
   const [menuDate, setMenuDate] = useState(todayInSeoul());
   const [editingMenu, setEditingMenu] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
+  const [editWeight, setEditWeight] = useState("");
+  const [chatMenuId, setChatMenuId] = useState("");
   useEffect(() => {
     const saved = readLocalData();
     if (saved) {
       const overrides = readCalorieOverrides();
       const restoredUploads = saved.uploads.filter(meal => meal.date === todayInSeoul()).map(meal => ({ ...meal,
         menu: meal.menu.map(menu => {
+          const refreshed = { ...menu, ...estimateCalories(menu.name) };
           const entered = overrides[`${meal.date}:${menu.id}`];
-          return Number.isFinite(entered) && entered > 0 ? { ...menu, ...userCalories(entered) } : menu;
+          return Number.isFinite(entered) && entered > 0 ? { ...refreshed, ...userCalories(entered) } : refreshed;
         }) }));
       setRecordsByDate(saved.recordsByDate);
       setVotes(saved.votes);
@@ -247,8 +254,9 @@ export default function Home() {
       setSyncState("loading");
       setMeals(uploads.filter(meal => meal.date === date).map(meal => ({ ...meal,
         menu: meal.menu.map(menu => {
+          const refreshed = { ...menu, ...estimateCalories(menu.name) };
           const entered = readCalorieOverrides()[`${date}:${menu.id}`];
-          return Number.isFinite(entered) && entered > 0 ? { ...menu, ...userCalories(entered) } : menu;
+          return Number.isFinite(entered) && entered > 0 ? { ...refreshed, ...userCalories(entered) } : refreshed;
         }) })));
       try {
         const response = await fetch(`${SIKSHA_API}/menus/web?start_date=${date}&end_date=${date}&except_empty=false`);
@@ -264,15 +272,21 @@ export default function Home() {
         if (active) {
           setMeals([...uploads.filter(meal => meal.date === date).map(meal => ({ ...meal,
             menu: meal.menu.map(menu => {
+              const refreshed = { ...menu, ...estimateCalories(menu.name) };
               const entered = overrides[`${date}:${menu.id}`];
-              return Number.isFinite(entered) && entered > 0 ? { ...menu, ...userCalories(entered) } : menu;
+              return Number.isFinite(entered) && entered > 0 ? { ...refreshed, ...userCalories(entered) } : refreshed;
             }) })), ...nextMeals]);
           setSyncState(nextMeals.length ? "live" : "empty");
         }
       } catch {
         if (active) {
           if (date === todayInSeoul()) {
-            setMeals([...uploads.filter(meal => meal.date === date), ...initialMeals.map(meal => ({ ...meal, menu: meal.menu.map(menu => ({ ...menu, score: 0, votes: 0, tags: ["예시"] })) }))]);
+            const overrides = readCalorieOverrides();
+            setMeals([...uploads.filter(meal => meal.date === date).map(meal => ({ ...meal, menu: meal.menu.map(menu => {
+              const refreshed = { ...menu, ...estimateCalories(menu.name) };
+              const entered = overrides[`${date}:${menu.id}`];
+              return Number.isFinite(entered) && entered > 0 ? { ...refreshed, ...userCalories(entered) } : refreshed;
+            }) })), ...initialMeals.map(meal => ({ ...meal, menu: meal.menu.map(menu => ({ ...menu, ...estimateCalories(menu.name), score: 0, votes: 0, tags: ["예시"] })) }))]);
             setSyncState("fallback");
           } else setSyncState("error");
         }
@@ -453,12 +467,16 @@ export default function Home() {
           editingMenu={editingMenu}
           editValue={editValue}
           setEditValue={setEditValue}
-          onEdit={(menu) => { setEditingMenu(menu.id); setEditValue(menu.kcal === null ? "" : String(menu.kcal)); }}
+          editWeight={editWeight}
+          setEditWeight={setEditWeight}
+          onEdit={(menu) => { setEditingMenu(menu.id); setEditValue(menu.kcal === null ? "" : String(menu.kcal)); setEditWeight(""); }}
           onCancelEdit={() => setEditingMenu(null)}
           onSaveCalories={saveCalories}
           onResetCalories={resetCalories}
+          onAskAi={(meal, menu) => { setChatMenuId(`${meal.id}:${menu.id}`); setView("chat"); }}
         />}
         {view === "upload" && <UploadView defaultDate={menuDate} defaultTime={mealType} onComplete={addUploadedMeal} />}
+        {view === "chat" && <ChatView meals={meals} date={menuDate} selectedMenuId={chatMenuId} setNotice={setNotice} />}
         {view === "records" && <RecordsView recordsByDate={recordsByDate} onRemove={removeRecord} />}
         {view === "profile" && <ProfileView target={target} setTarget={updateTarget} targetKcal={targetKcal} setTargetKcal={setTargetKcal} preferredCategories={preferredCategories} setPreferredCategories={setPreferredCategories} allergies={allergies} setAllergies={setAllergies} dislikedIngredients={dislikedIngredients} setDislikedIngredients={setDislikedIngredients} onClearData={clearLocalData} />}
       </section>
@@ -470,8 +488,8 @@ export default function Home() {
   );
 }
 
-function HomeView({ meals, allMeals, cafeteria, setCafeteria, mealType, setMealType, selected, toggleSelection, total, unknownSelected, progress, targetKcal, votes, preferredCategories, allergies, dislikedIngredients, recordsByDate, onVote, setView, syncState, menuDate, setMenuDate, onRemoveUpload, editingMenu, editValue, setEditValue, onEdit, onCancelEdit, onSaveCalories, onResetCalories }: {
-  meals: Meal[]; allMeals: Meal[]; cafeteria: string; setCafeteria: (value: string) => void; mealType: Meal["time"]; setMealType: (value: Meal["time"]) => void; selected: string[]; toggleSelection: (id: string) => void; total: number; unknownSelected: number; progress: number; targetKcal: number; votes: Record<string, "like" | "dislike">; preferredCategories: string[]; allergies: string[]; dislikedIngredients: string; recordsByDate: Record<string, MealRecord[]>; onVote: (id: string, value: "like" | "dislike") => void; setView: (view: string) => void; syncState: "loading" | "live" | "fallback" | "empty" | "error"; menuDate: string; setMenuDate: (date: string) => void; onRemoveUpload: (id: string) => void; editingMenu: string | null; editValue: string; setEditValue: (value: string) => void; onEdit: (menu: Menu) => void; onCancelEdit: () => void; onSaveCalories: (id: string) => void; onResetCalories: (id: string) => void;
+function HomeView({ meals, allMeals, cafeteria, setCafeteria, mealType, setMealType, selected, toggleSelection, total, unknownSelected, progress, targetKcal, votes, preferredCategories, allergies, dislikedIngredients, recordsByDate, onVote, setView, syncState, menuDate, setMenuDate, onRemoveUpload, editingMenu, editValue, setEditValue, editWeight, setEditWeight, onEdit, onCancelEdit, onSaveCalories, onResetCalories, onAskAi }: {
+  meals: Meal[]; allMeals: Meal[]; cafeteria: string; setCafeteria: (value: string) => void; mealType: Meal["time"]; setMealType: (value: Meal["time"]) => void; selected: string[]; toggleSelection: (id: string) => void; total: number; unknownSelected: number; progress: number; targetKcal: number; votes: Record<string, "like" | "dislike">; preferredCategories: string[]; allergies: string[]; dislikedIngredients: string; recordsByDate: Record<string, MealRecord[]>; onVote: (id: string, value: "like" | "dislike") => void; setView: (view: string) => void; syncState: "loading" | "live" | "fallback" | "empty" | "error"; menuDate: string; setMenuDate: (date: string) => void; onRemoveUpload: (id: string) => void; editingMenu: string | null; editValue: string; setEditValue: (value: string) => void; editWeight: string; setEditWeight: (value: string) => void; onEdit: (menu: Menu) => void; onCancelEdit: () => void; onSaveCalories: (id: string) => void; onResetCalories: (id: string) => void; onAskAi: (meal: Meal, menu: Menu) => void;
 }) {
   const [query, setQuery] = useState("");
   const visibleMeals = query.trim() ? meals.map(meal => ({ ...meal, menu: meal.menu.filter(menu => menu.name.toLowerCase().includes(query.trim().toLowerCase()) || meal.cafeteria.toLowerCase().includes(query.trim().toLowerCase())) })).filter(meal => meal.menu.length) : meals;
@@ -528,6 +546,7 @@ function HomeView({ meals, allMeals, cafeteria, setCafeteria, mealType, setMealT
 
     <section className="meal-heading"><div><p className="eyebrow">{dateLabel(menuDate)} 식단</p><h2>어디서 먹을까요?</h2></div><button onClick={() => setView("upload")}>빠진 식단 직접 등록 <span>＋</span></button></section>
     <div className={`sync-status ${syncState}`}><span>{syncState === "live" ? "●" : syncState === "loading" ? "◌" : "!"}</span>{syncState === "live" ? `식샤 연동 · ${new Set(allMeals.filter(meal => !meal.id.startsWith("upload-")).map(meal => meal.cafeteria)).size}개 식당` : syncState === "loading" ? "식샤 식단을 불러오는 중" : syncState === "fallback" ? "식샤 연결 실패 · 오늘의 예시 식단 표시 중" : syncState === "empty" ? "식샤에 이 날짜의 등록 메뉴가 없어요" : "식샤 연결 실패 · 이 날짜의 식단을 불러오지 못했어요"}<small>{syncState === "live" ? "10분마다 갱신" : ""}</small></div>
+    {allMeals.length > 0 && <p className="estimate-summary">식약처 음식 DB와 제공량 기준으로 추정합니다. 자료가 없는 메뉴 {allMeals.flatMap(meal => meal.menu).filter(menu => menu.kcal === null).length}개는 임의의 칼로리를 만들지 않았어요. 실제 양은 메뉴의 ‘칼로리·분량 수정’에서 조정할 수 있습니다.</p>}
     <div className="filter-row">
       {['전체 식당', ...allMeals.map((meal) => meal.cafeteria)].filter((item, index, items) => items.indexOf(item) === index).map((item) => <button className={cafeteria === item ? "chosen" : ""} key={item} onClick={() => setCafeteria(item)}>{item}</button>)}
     </div>
@@ -539,13 +558,53 @@ function HomeView({ meals, allMeals, cafeteria, setCafeteria, mealType, setMealT
         <div className="menu-list">{meal.menu.map((menu) => <div className="menu-entry" key={menu.id}>
           <div className="menu-entry-top"><div className="menu-item"><span className="menu-name">{menu.name}<small>{menu.tags.map(tag => <i key={tag}>{tag}</i>)}</small></span><span className="menu-meta"><b>{formatKcal(menu.kcal)}</b><small>{menu.price ? `${menu.price.toLocaleString("ko-KR")}원 · ` : ""}{menu.confidence === "직접 입력" ? "직접 입력" : `${menu.confidence} 신뢰도`}</small>{menu.votes > 0 && <small>★ {menu.score.toFixed(1)} · 식샤 {menu.votes}명 평가</small>}</span></div></div>
           <p className="calorie-basis">{menu.low != null && menu.high != null && menu.confidence !== "직접 입력" ? `예상 ${menu.low.toLocaleString("ko-KR")}~${menu.high.toLocaleString("ko-KR")} kcal · ` : ""}{menu.basis || "예시 식단의 칼로리 추정치"}{menu.sourceUrl && <> · <a href={menu.sourceUrl} target="_blank" rel="noopener noreferrer">참고 자료</a></>}</p>
-          <div className="menu-actions"><button disabled={isFuture} aria-pressed={selected.includes(menu.id)} className={selected.includes(menu.id) ? "logged" : ""} onClick={() => toggleSelection(menu.id)}>{selected.includes(menu.id) ? "✓ 먹은 기록 취소" : "＋ 먹었어요"}</button><button onClick={() => onEdit(menu)} aria-label={`${menu.name} 칼로리 수정`}>칼로리 수정</button><button aria-pressed={voteFor(menu) === "like"} onClick={() => onVote(menu.id, "like")}>👍{voteFor(menu) === "like" ? " 관심 표시됨" : " 관심"}</button><button aria-pressed={voteFor(menu) === "dislike"} onClick={() => onVote(menu.id, "dislike")}>👎{voteFor(menu) === "dislike" ? " 제외됨" : " 제외"}</button></div>
-          {editingMenu === menu.id && <div className="calorie-editor"><label>확인한 칼로리 (kcal)<input type="number" min="1" max="5000" inputMode="numeric" value={editValue} onChange={event => setEditValue(event.target.value)} /></label><button onClick={() => onSaveCalories(menu.id)}>저장</button><button onClick={() => onResetCalories(menu.id)}>추정치로 되돌리기</button><button onClick={onCancelEdit}>취소</button></div>}
+          <div className="menu-actions"><button disabled={isFuture} aria-pressed={selected.includes(menu.id)} className={selected.includes(menu.id) ? "logged" : ""} onClick={() => toggleSelection(menu.id)}>{selected.includes(menu.id) ? "✓ 먹은 기록 취소" : "＋ 먹었어요"}</button><button onClick={() => onEdit(menu)} aria-label={`${menu.name} 칼로리와 분량 수정`}>칼로리·분량 수정</button><button onClick={() => onAskAi(meal, menu)} aria-label={`${menu.name} ChatGPT 질문 준비`}>AI에게 묻기</button><button aria-pressed={voteFor(menu) === "like"} onClick={() => onVote(menu.id, "like")}>👍{voteFor(menu) === "like" ? " 관심 표시됨" : " 관심"}</button><button aria-pressed={voteFor(menu) === "dislike"} onClick={() => onVote(menu.id, "dislike")}>👎{voteFor(menu) === "dislike" ? " 제외됨" : " 제외"}</button></div>
+          {editingMenu === menu.id && <div className="calorie-editor">
+            {estimateCalories(menu.name).kcal !== null && <div className="portion-controls"><span>참고 1인분과 비교해 실제 먹은 양을 선택하세요.</span><div>{[0.5, 1, 1.5, 2].map(portion => <button type="button" key={portion} onClick={() => setEditValue(String(Math.round((estimateCalories(menu.name).kcal || 0) * portion)))}>{portion}인분</button>)}</div></div>}
+            {menu.perBasisKcal && menu.basisAmount && <div className="weight-controls"><label>실제 먹은 중량 ({menu.amountUnit})<input type="number" min="1" max="2000" inputMode="decimal" value={editWeight} onChange={event => setEditWeight(event.target.value)} placeholder={`예: ${menu.basisAmount}`} /></label><button type="button" disabled={!Number.isFinite(Number(editWeight)) || Number(editWeight) <= 0 || Number(editWeight) > 2000} onClick={() => setEditValue(String(Math.round(menu.perBasisKcal! * Number(editWeight) / menu.basisAmount!)))}>중량으로 계산</button><small>식약처 {menu.basisAmount}{menu.amountUnit}당 {menu.perBasisKcal} kcal 기준</small></div>}
+            <label>칼로리 수정 (kcal)<input type="number" min="1" max="5000" inputMode="numeric" value={editValue} onChange={event => setEditValue(event.target.value)} /></label><button onClick={() => onSaveCalories(menu.id)}>저장</button><button onClick={() => onResetCalories(menu.id)}>추정치로 되돌리기</button><button onClick={onCancelEdit}>취소</button>
+            <p>인분·중량 계산 후 ‘저장’을 눌러 반영하세요. 식당 영양표시가 있다면 kcal를 직접 입력해 주세요.</p>
+          </div>}
         </div>)}</div>
       </article>)}
       {!visibleMeals.length && <div className="empty"><span>🍽️</span><h3>{syncState === "loading" ? "식단을 불러오는 중" : "표시할 식단이 없어요"}</h3><p>{query ? "검색어를 바꾸거나 지워 주세요." : syncState === "error" ? "식샤 연결 상태를 확인하거나 나중에 다시 시도해 주세요." : "다른 날짜·끼니·식당을 선택하거나 빠진 식단을 직접 등록해 주세요."}</p><button onClick={() => setView("upload")}>식단 직접 등록</button></div>}
     </div>
   </>;
+}
+
+function ChatView({ meals, date, selectedMenuId, setNotice }: { meals: Meal[]; date: string; selectedMenuId: string; setNotice: (value: string) => void }) {
+  const [menuId, setMenuId] = useState(selectedMenuId);
+  const [menuQuery, setMenuQuery] = useState("");
+  const [details, setDetails] = useState("");
+  const [question, setQuestion] = useState("이 식단의 칼로리 추정이 타당한지 검토하고 더 정확히 추정하려면 무엇을 확인해야 할까?");
+  const options = meals.flatMap(meal => meal.menu.map(menu => ({ key: `${meal.id}:${menu.id}`, menu, cafeteria: meal.cafeteria, time: meal.time })));
+  const selected = options.find(option => option.key === menuId);
+  const matches = options.filter(option => `${option.cafeteria} ${option.menu.name}`.toLowerCase().includes(menuQuery.trim().toLowerCase())).slice(0, 40);
+  const visibleOptions = selected && !matches.some(option => option.key === selected.key) ? [selected, ...matches] : matches;
+  const prompt = [
+    "서울대 학식 메뉴의 칼로리를 검토해 줘. 메뉴명만으로 실제 칼로리를 확정하지 말고, 모르는 양·재료·조리법은 질문해 줘. 가능하면 음식별 근거, 분량 가정, 합산 과정과 범위(kcal)를 보여 줘. 출처를 확인하지 못한 수치는 추정이라고 밝혀 줘.",
+    selected ? `날짜: ${date}\n식당: ${selected.cafeteria}\n끼니: ${selected.time}\n메뉴: ${selected.menu.name}\n현재 사이트 추정: ${selected.menu.kcal === null ? "확인 필요" : `${selected.menu.kcal} kcal (범위 ${selected.menu.low ?? "미상"}~${selected.menu.high ?? "미상"} kcal)`}\n현재 근거: ${selected.menu.basis || "없음"}` : "메뉴: 아래 추가 정보에 적은 음식",
+    details.trim() ? `내가 확인한 분량·재료·영양표시: ${details.trim()}` : "분량·재료·영양표시는 아직 확인하지 못했음",
+    `질문: ${question.trim() || "칼로리 추정을 검토해 줘."}`
+  ].join("\n\n");
+
+  async function copyPrompt() {
+    try { await navigator.clipboard.writeText(prompt); setNotice("질문을 복사했어요. ChatGPT에 붙여넣어 대화를 시작하세요."); }
+    catch { setNotice("자동 복사에 실패했어요. 아래 질문을 직접 선택해 복사해 주세요."); }
+  }
+
+  return <section className="form-page chat-page">
+    <p className="eyebrow">칼로리 검토 도우미</p>
+    <h1>ChatGPT와 <em>함께 확인해요.</em></h1>
+    <p className="subcopy">식단과 추정 근거를 질문에 담아 드립니다. 질문을 복사한 뒤 ChatGPT를 열어 붙여넣으세요. 대화는 이 사이트 안에서 진행되지 않습니다.</p>
+    <label className="field"><span>검토할 메뉴 검색</span><input type="search" value={menuQuery} onChange={event => setMenuQuery(event.target.value)} placeholder="메뉴명이나 식당명을 입력하세요" /></label>
+    <label className="field"><span>검토할 메뉴 <small>검색 결과 최대 40개</small></span><select value={menuId} onChange={event => setMenuId(event.target.value)}><option value="">메뉴를 직접 설명할게요</option>{visibleOptions.map(({ key, menu, cafeteria, time }) => <option key={key} value={key}>{cafeteria} · {time} · {menu.name}</option>)}</select></label>
+    <label className="field"><span>알고 있는 분량·재료·영양표시 <small>선택 입력</small></span><textarea rows={3} value={details} onChange={event => setDetails(event.target.value)} placeholder="예: 밥 반 공기, 제육 약 120g, 포장지에 650 kcal 표시" /></label>
+    <label className="field"><span>궁금한 점</span><textarea rows={3} value={question} onChange={event => setQuestion(event.target.value)} /></label>
+    <label className="field"><span>복사할 질문 미리보기</span><textarea rows={12} readOnly value={prompt} onFocus={event => event.currentTarget.select()} /></label>
+    <div className="chat-actions"><button className="primary-button" onClick={copyPrompt}>질문 복사</button><a href="https://chatgpt.com/" target="_blank" rel="noopener noreferrer">ChatGPT 새 탭 열기 ↗</a></div>
+    <p className="privacy-note">🔒 자동 전송은 하지 않습니다. 붙여넣은 내용은 ChatGPT의 서비스 정책에 따라 처리됩니다. AI가 제시한 칼로리도 추정치이며, 실제 제공량·조리법 또는 식당의 영양표시가 더 중요합니다.</p>
+  </section>;
 }
 
 function UploadView({ defaultDate, defaultTime, onComplete }: { defaultDate: string; defaultTime: Meal["time"]; onComplete: (name: string, menu: string, date: string, time: Meal["time"]) => void }) {
