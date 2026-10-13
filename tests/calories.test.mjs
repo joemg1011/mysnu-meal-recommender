@@ -33,10 +33,24 @@ test("rice assumption and matched dish source are visible", () => {
   assert.ok(estimateCalories("<경성 돈카츠>").kcal > 0);
 });
 
-test("ambiguous combinations and unknown dishes no longer invent numbers", () => {
-  for (const name of ["TAKE-OUT", "신메뉴", "뷔페+반찬+국+밥+음료", "등심돈가스&숏파스타", "돈가스비빔면", "훈제연어포케", "연어 비빔밥(S)", "연어 비빔밥(L)"]) {
-    assert.equal(estimateCalories(name).kcal, null, name);
+test("food dishes receive numeric estimates with gram-based assumptions", () => {
+  for (const name of ["등심돈가스&숏파스타", "돈가스비빔면", "훈제연어포케", "장어비빔밥", "우삼겹 쌀국수", "새우튀김 카레라이스", "모르는신메뉴덮밥"]) {
+    const result = estimateCalories(name);
+    assert.ok(result.kcal > 0, name);
+    assert.match(result.basis, /g/, name);
+    assert.equal(result.confidence, "낮음", name);
+    assert.ok(result.high > result.kcal && result.low < result.kcal, name);
   }
+  assert.equal(estimateCalories("TAKE-OUT").kcal, null);
+  assert.equal(estimateCalories("신메뉴").kcal, null);
+});
+
+test("S and L sizes use distinct disclosed serving multipliers", () => {
+  const small = estimateCalories("연어 비빔밥(S)");
+  const large = estimateCalories("연어 비빔밥(L)");
+  assert.ok(small.kcal < large.kcal);
+  assert.match(small.basis, /0.75배 중량/);
+  assert.match(large.basis, /1.3배 중량/);
 });
 
 test("named similar food is transparently a low-confidence proxy", () => {
@@ -47,11 +61,19 @@ test("named similar food is transparently a low-confidence proxy", () => {
   assert.ok(result.high - result.low > 400);
 });
 
-test("per-100g-only data stays unestimated but exposes a weight calculation basis", () => {
+test("per-100g-only data uses an explicit serving assumption", () => {
   const result = estimateCalories("마라탕");
-  assert.equal(result.kcal, null);
+  assert.equal(result.kcal, 360);
+  assert.match(result.basis, /550g 가정/);
   assert.equal(result.basisAmount, 100);
   assert.ok(result.perBasisKcal > 0);
   assert.equal(result.amountUnit, "g");
   assert.ok(result.sourceUrl);
+});
+
+test("priced restaurant set parses its food components and serving weights", () => {
+  const result = estimateCalories("한입치킨 세트 - 버거운치킨버거 + 후라이드치킨 반마리 + 음료 1잔 = 17,100원 (순살변경 + )");
+  assert.ok(result.kcal > 1000);
+  assert.match(result.basis, /반마리.*300g/);
+  assert.match(result.basis, /음료 350g/);
 });

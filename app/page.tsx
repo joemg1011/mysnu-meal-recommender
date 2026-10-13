@@ -504,7 +504,7 @@ function HomeView({ meals, allMeals, cafeteria, setCafeteria, mealType, setMealT
       + (preferredCategories.includes(menu.category) ? 22 : 0)
       + (voteFor(menu) === "like" ? 26 : voteFor(menu) === "dislike" ? -35 : 0)
       + Math.min(3, history.filter(item => item.name === menu.name).length) * 8
-      + Math.max(0, 18 - Math.abs((menu.kcal || 0) - mealTarget) / 30);
+      + Math.max(0, 18 - Math.abs((menu.kcal || 0) - mealTarget) / 30) * (menu.confidence === "낮음" ? 0.35 : 1);
     return rank(second) - rank(first);
   })[0];
   const recommendationRestaurant = allMeals.find((meal) => meal.menu.some((menu) => menu.id === recommendation?.id));
@@ -546,7 +546,7 @@ function HomeView({ meals, allMeals, cafeteria, setCafeteria, mealType, setMealT
 
     <section className="meal-heading"><div><p className="eyebrow">{dateLabel(menuDate)} 식단</p><h2>어디서 먹을까요?</h2></div><button onClick={() => setView("upload")}>빠진 식단 직접 등록 <span>＋</span></button></section>
     <div className={`sync-status ${syncState}`}><span>{syncState === "live" ? "●" : syncState === "loading" ? "◌" : "!"}</span>{syncState === "live" ? `식샤 연동 · ${new Set(allMeals.filter(meal => !meal.id.startsWith("upload-")).map(meal => meal.cafeteria)).size}개 식당` : syncState === "loading" ? "식샤 식단을 불러오는 중" : syncState === "fallback" ? "식샤 연결 실패 · 오늘의 예시 식단 표시 중" : syncState === "empty" ? "식샤에 이 날짜의 등록 메뉴가 없어요" : "식샤 연결 실패 · 이 날짜의 식단을 불러오지 못했어요"}<small>{syncState === "live" ? "10분마다 갱신" : ""}</small></div>
-    {allMeals.length > 0 && <p className="estimate-summary">식약처 음식 DB와 제공량 기준으로 추정합니다. 자료가 없는 메뉴 {allMeals.flatMap(meal => meal.menu).filter(menu => menu.kcal === null).length}개는 임의의 칼로리를 만들지 않았어요. 실제 양은 메뉴의 ‘칼로리·분량 수정’에서 조정할 수 있습니다.</p>}
+    {allMeals.length > 0 && <p className="estimate-summary">음식 DB 값이 없거나 1인분 중량이 빠진 메뉴도 일반적인 재료·분량을 가정해 추정합니다. 각 메뉴 아래의 g 단위 계산 근거와 예상 범위를 확인해 주세요. 음식명이 아닌 안내 항목 {allMeals.flatMap(meal => meal.menu).filter(menu => menu.kcal === null).length}개는 제외했습니다. 실제 양은 ‘칼로리·분량 수정’에서 조정할 수 있습니다.</p>}
     <div className="filter-row">
       {['전체 식당', ...allMeals.map((meal) => meal.cafeteria)].filter((item, index, items) => items.indexOf(item) === index).map((item) => <button className={cafeteria === item ? "chosen" : ""} key={item} onClick={() => setCafeteria(item)}>{item}</button>)}
     </div>
