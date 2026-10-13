@@ -25,3 +25,15 @@ npm.cmd run dev
 4. 다음 단계: 식약처 통합 영양성분 DB를 정기적으로 가져와 더 많은 음식의 1인분 기준값을 매칭하고, 식당별 실제 제공량과 영양표시를 확보해 계산값을 검증합니다. 현재 식샤 메뉴 응답에는 제공량이나 조리법이 없으므로 이 단계 없이 실제 섭취 열량을 확정할 수 없습니다.
 
 계산 규칙은 `lib/calories.ts`, 대표적인 오분류 회귀 검사는 `tests/calories.test.mjs`에 있습니다. 검사는 `node --test tests/calories.test.mjs`로 실행합니다. 범위는 측정된 오차율이 아닌 분량과 조리법이 달라질 수 있음을 보여주는 참고 범위입니다.
+
+## Google 로그인 연결
+
+이 사이트는 GitHub Pages의 정적 페이지이므로 Supabase Auth의 브라우저 OAuth 흐름을 사용합니다. UI와 세션 복원·로그아웃은 구현되어 있습니다. 실제 로그인은 아래 외부 설정이 끝나야 활성화됩니다.
+
+1. Supabase 프로젝트에서 `supabase/schema.sql`을 적용하고, 이어 `supabase/google-auth.sql`을 적용합니다. 두 번째 파일은 새 로그인 사용자의 프로필을 만들고 본인 프로필만 읽을 수 있도록 합니다.
+2. Google Cloud Console에서 웹 애플리케이션 OAuth 클라이언트를 생성합니다. 승인된 JavaScript 원본은 `https://joemg1011.github.io`, 승인된 리디렉션 URI는 Supabase Dashboard의 Google Provider 페이지에 표시된 `https://<project-ref>.supabase.co/auth/v1/callback`을 사용합니다. Google 동의 화면의 `openid`, 이메일, 프로필 범위도 구성합니다.
+3. Supabase Dashboard → Authentication → Providers → Google에서 Client ID와 Client Secret을 입력하고 활성화합니다. Client Secret은 코드나 GitHub 저장소에 넣지 않습니다.
+4. Supabase Dashboard → Authentication → URL Configuration에서 Site URL을 `https://joemg1011.github.io/mysnu-meal-recommender/`로, Redirect URL에도 같은 주소를 추가합니다. 로컬 개발에는 `http://localhost:3000/`을 추가합니다.
+5. GitHub 저장소 Settings → Secrets and variables → Actions → Variables에 `NEXT_PUBLIC_SUPABASE_URL`과 `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`를 넣고 Pages 워크플로를 다시 실행합니다. 이 둘은 공개용 연결 정보이며 service role key를 넣으면 안 됩니다. 로컬에서는 `.env.example`을 참고해 `.env.local`에 같은 값으로 설정합니다.
+
+로그인 후 Google 이름 또는 이메일은 내 설정 화면에 표시됩니다. 현재 투표·선택·칼로리 수정은 로그인 계정에 아직 동기화되지 않습니다.

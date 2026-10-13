@@ -1,7 +1,9 @@
 "use client";
 
 import { ChangeEvent, useEffect, useMemo, useState } from "react";
+import type { User } from "@supabase/supabase-js";
 import { estimateCalories, userCalories } from "../lib/calories";
+import { getSupabaseClient, isSupabaseConfigured } from "../lib/supabase";
 
 type Menu = {
   id: string;
@@ -146,6 +148,51 @@ export default function Home() {
   const [menuDate, setMenuDate] = useState(todayInSeoul());
   const [editingMenu, setEditingMenu] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
+  const [authUser, setAuthUser] = useState<User | null>(null);
+  const [authLoading, setAuthLoading] = useState(isSupabaseConfigured());
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authError, setAuthError] = useState("");
+
+  useEffect(() => {
+    const supabase = getSupabaseClient();
+    if (!supabase) return;
+    let active = true;
+    const hash = new URLSearchParams(window.location.hash.slice(1));
+    if (hash.get("error")) setAuthError(hash.get("error_description") || "Google 로그인에 실패했어요. 다시 시도해 주세요.");
+    supabase.auth.getUser().then(({ data, error }) => {
+      if (active) {
+        setAuthUser(data.user);
+        setAuthLoading(false);
+        if (error && data.user) setAuthError(error.message);
+      }
+    });
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (active) { setAuthUser(session?.user || null); setAuthLoading(false); }
+    });
+    return () => { active = false; subscription.unsubscribe(); };
+  }, []);
+
+  async function signInWithGoogle() {
+    const supabase = getSupabaseClient();
+    if (!supabase) { setAuthError("로그인 서버가 아직 연결되지 않았어요."); return; }
+    setAuthBusy(true);
+    setAuthError("");
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: "google",
+      options: { redirectTo: `${window.location.origin}${window.location.pathname}` }
+    });
+    if (error) { setAuthError(error.message); setAuthBusy(false); }
+  }
+
+  async function signOut() {
+    const supabase = getSupabaseClient();
+    if (!supabase) return;
+    setAuthBusy(true);
+    const { error } = await supabase.auth.signOut();
+    if (error) setAuthError(error.message);
+    else { setAuthUser(null); setNotice("로그아웃했어요."); }
+    setAuthBusy(false);
+  }
 
   useEffect(() => {
     let active = true;
@@ -253,7 +300,7 @@ export default function Home() {
         </button>
         <div className="top-actions">
           <button className="icon-button" onClick={() => setNotice("알림이 없어요. 점심 메뉴가 업데이트되면 알려드릴게요.")} aria-label="알림">♧</button>
-          <button className="avatar" onClick={() => setView("profile")} aria-label="내 설정">J</button>
+          <button className={authUser ? "avatar" : "login-shortcut"} onClick={() => setView("profile")} aria-label={authUser ? "내 계정과 설정" : "Google 로그인 화면 열기"}>{authUser ? (authUser.email?.[0] || "나").toUpperCase() : "로그인"}</button>
         </div>
       </header>
 
@@ -287,7 +334,7 @@ export default function Home() {
         />}
         {view === "upload" && <UploadView onComplete={addUploadedMeal} />}
         {view === "records" && <RecordsView selected={selected} allMenu={allMenu} total={todayTotal} />}
-        {view === "profile" && <ProfileView target={target} setTarget={setTarget} onAdmin={() => setShowAdmin(true)} />}
+        {view === "profile" && <ProfileView target={target} setTarget={setTarget} onAdmin={() => setShowAdmin(true)} authUser={authUser} authLoading={authLoading} authBusy={authBusy} authError={authError} authConfigured={isSupabaseConfigured()} onGoogleSignIn={signInWithGoogle} onSignOut={signOut} />}
       </section>
 
       <nav className="bottom-nav" aria-label="주요 메뉴">
@@ -377,8 +424,15 @@ function RecordsView({ selected, allMenu, total }: { selected: string[]; allMenu
   return <section className="form-page records"><p className="eyebrow">나의 식사 기록</p><h1>오늘도 <em>잘 챙겨 먹었어요.</em></h1><div className="week-chart"><div className="chart-head"><span>이번 주 섭취 칼로리</span><b>평균 1,724 kcal</b></div><div className="bars">{[52, 77, 66, 93, 61, 80, 70].map((height, index) => <span key={index} className={index === 1 ? "today" : ""}><i style={{ height: `${height}%` }}></i><small>{["월", "화", "수", "목", "금", "토", "일"][index]}</small></span>)}</div></div><div className="record-summary"><p>오늘 선택한 메뉴 <b>{selectedMenu.length}개</b></p><strong>{formatKcal(total)}</strong></div><div className="record-list">{selectedMenu.length ? selectedMenu.map(item => <div key={item.id}><span className="mini-check">✓</span><p>{item.name}<small>{item.category} · 칼로리 추정치</small></p><b>{formatKcal(item.kcal)}</b></div>) : <p>아직 선택한 메뉴가 없어요.</p>}</div></section>;
 }
 
-function ProfileView({ target, setTarget, onAdmin }: { target: string; setTarget: (value: string) => void; onAdmin: () => void }) {
-  return <section className="form-page profile"><p className="eyebrow">내 식단 설정</p><h1>취향을 알수록<br /><em>추천은 더 정확해져요.</em></h1><label className="field"><span>칼로리 목표</span><select value={target} onChange={e => setTarget(e.target.value)}><option>다이어트</option><option>유지</option><option>벌크업</option></select></label><div className="preference"><span>선호 식단</span><div><button className="chosen">한식</button><button className="chosen">양식</button><button>일식</button><button>샐러드</button></div></div><div className="preference"><span>알레르기 / 제외 식재료</span><div><button>없음</button><button>견과류</button><button>갑각류</button><button>유제품</button></div></div><section className="privacy-card"><strong>내 추천 데이터</strong><p>평가와 선택 기록은 개인화 추천에만 사용됩니다. 언제든 기록과 선호도를 삭제할 수 있어요.</p><button>내 데이터 삭제</button></section><button className="admin-link" onClick={onAdmin}>관리자 식단 검수 화면 열기 →</button></section>;
+function ProfileView({ target, setTarget, onAdmin, authUser, authLoading, authBusy, authError, authConfigured, onGoogleSignIn, onSignOut }: {
+  target: string; setTarget: (value: string) => void; onAdmin: () => void; authUser: User | null; authLoading: boolean; authBusy: boolean; authError: string; authConfigured: boolean; onGoogleSignIn: () => void; onSignOut: () => void;
+}) {
+  return <section className="form-page profile"><p className="eyebrow">내 식단 설정</p><h1>취향을 알수록<br /><em>추천은 더 정확해져요.</em></h1>
+    <section className="auth-card" aria-label="계정">
+      {authLoading ? <p role="status">로그인 상태를 확인하는 중이에요.</p> : authUser ? <><strong>Google 계정으로 로그인했어요</strong><p>{authUser.user_metadata?.full_name || authUser.email || "로그인 사용자"}</p><button className="signout-button" onClick={onSignOut} disabled={authBusy}>로그아웃</button></> : <><strong>내 계정</strong><p>Google 계정으로 간편하게 로그인할 수 있어요.</p><button className="google-button" onClick={onGoogleSignIn} disabled={authBusy || !authConfigured}><span aria-hidden="true">G</span>{authBusy ? "Google로 이동하는 중…" : "Google로 로그인"}</button>{!authConfigured && <small>로그인 서버 연결을 준비 중이에요.</small>}</>}
+      {authError && <p className="auth-error" role="alert">{authError}</p>}
+    </section>
+    <label className="field"><span>칼로리 목표</span><select value={target} onChange={e => setTarget(e.target.value)}><option>다이어트</option><option>유지</option><option>벌크업</option></select></label><div className="preference"><span>선호 식단</span><div><button className="chosen">한식</button><button className="chosen">양식</button><button>일식</button><button>샐러드</button></div></div><div className="preference"><span>알레르기 / 제외 식재료</span><div><button>없음</button><button>견과류</button><button>갑각류</button><button>유제품</button></div></div><section className="privacy-card"><strong>내 추천 데이터</strong><p>현재 투표와 선택은 이 화면의 데모 기능이며, Google 계정에 아직 저장되지 않습니다.</p><button>내 데이터 삭제</button></section><button className="admin-link" onClick={onAdmin}>관리자 식단 검수 화면 열기 →</button></section>;
 }
 
 function AdminSheet({ onClose }: { onClose: () => void }) { return <div className="modal-backdrop"><section className="admin-sheet"><button className="close" onClick={onClose}>×</button><p className="eyebrow">관리자 · 검수 대기</p><h2>새 식단 3건</h2><div className="pending"><div><span>학생회관 식당</span><b>메뉴 OCR 신뢰도 78%</b></div><p>김치볶음밥 · 계란후라이 · 유부장국</p><button>검수 시작</button></div><div className="pending"><div><span>기숙사 식당</span><b>칼로리 미입력 2개</b></div><p>닭갈비 · 현미밥 · 콘샐러드</p><button>검수 시작</button></div></section></div>; }
