@@ -1,16 +1,21 @@
 "use client";
 
 import { ChangeEvent, useEffect, useMemo, useState } from "react";
+import { estimateCalories, userCalories } from "../lib/calories";
 
 type Menu = {
   id: string;
   name: string;
-  kcal: number;
+  kcal: number | null;
   category: string;
   tags: string[];
   score: number;
   votes: number;
-  confidence: "높음" | "보통" | "낮음";
+  confidence: "높음" | "보통" | "낮음" | "확인 필요" | "직접 입력";
+  low?: number | null;
+  high?: number | null;
+  basis?: string;
+  sourceUrl?: string;
   price?: number;
 };
 
@@ -70,11 +75,17 @@ const tabItems = [
   { id: "profile", label: "내 설정", icon: "♙" }
 ];
 
-function formatKcal(value: number) {
-  return `${value.toLocaleString("ko-KR")} kcal`;
+function formatKcal(value: number | null) {
+  return value === null ? "칼로리 확인 필요" : `${value.toLocaleString("ko-KR")} kcal`;
 }
 
 const SIKSHA_API = "https://siksha-server.wafflestudio.com";
+const CALORIE_OVERRIDES_KEY = "mysnu-calorie-overrides-v1";
+
+function readCalorieOverrides(): Record<string, number> {
+  try { return JSON.parse(window.localStorage.getItem(CALORIE_OVERRIDES_KEY) || "{}"); }
+  catch { return {}; }
+}
 
 function todayInSeoul() {
   const parts = new Intl.DateTimeFormat("en-CA", {
@@ -90,16 +101,6 @@ function dateLabel(date: string) {
   const value = (type: string) => parts.find((part) => part.type === type)?.value || "";
   const weekday = new Intl.DateTimeFormat("ko-KR", { timeZone: "Asia/Seoul", weekday: "short" }).format(day);
   return `${value("month")}월 ${value("day")}일 ${weekday}`;
-}
-
-function estimateCalories(name: string) {
-  if (/샐러드|나물|피클|김치|과일|두부/.test(name)) return 95;
-  if (/찌개|국|탕|쌀국수|라면|우동/.test(name)) return 410;
-  if (/돈까스|치킨|제육|불고기|갈비|닭/.test(name)) return 610;
-  if (/덮밥|볶음밥|비빔밥|카레|파스타/.test(name)) return 590;
-  if (/밥|김밥/.test(name)) return 330;
-  if (/빵|버거|샌드위치/.test(name)) return 480;
-  return 320;
 }
 
 function mealTag(type: string): Meal["time"] {
@@ -121,12 +122,11 @@ function liveMealsFromSiksha(payload: any): Meal[] {
       menu: restaurant.menus.map((item: any) => ({
         id: `siksha-${item.id}`,
         name: String(item.name_kr || item.nameKr || item.code || "이름 없는 메뉴").replace(/<|>/g, ""),
-        kcal: estimateCalories(item.name_kr || item.nameKr || item.code || ""),
+        ...estimateCalories(item.name_kr || item.nameKr || item.code || ""),
         category: mealTag(group),
         tags: ["식샤"],
         score: Number(item.score) || 0,
         votes: Number(item.review_cnt) || 0,
-        confidence: "낮음" as const,
         price: item.price == null ? undefined : Number(item.price)
       }))
     })));
@@ -144,6 +144,8 @@ export default function Home() {
   const [showAdmin, setShowAdmin] = useState(false);
   const [syncState, setSyncState] = useState<"loading" | "live" | "fallback">("loading");
   const [menuDate, setMenuDate] = useState(todayInSeoul());
+  const [editingMenu, setEditingMenu] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState("");
 
   useEffect(() => {
     let active = true;
@@ -152,11 +154,18 @@ export default function Home() {
       try {
         const response = await fetch(`${SIKSHA_API}/menus/web?start_date=${date}&end_date=${date}&except_empty=false`);
         if (!response.ok) throw new Error("식샤 서버 응답 오류");
-        const nextMeals = liveMealsFromSiksha(await response.json());
+        const overrides = readCalorieOverrides();
+        const nextMeals = liveMealsFromSiksha(await response.json()).map(meal => ({
+          ...meal,
+          menu: meal.menu.map(menu => {
+            const entered = overrides[`${date}:${menu.id}`];
+            return Number.isFinite(entered) && entered > 0 ? { ...menu, ...userCalories(entered) } : menu;
+          })
+        }));
         if (!nextMeals.length) throw new Error("등록된 식단 없음");
         if (active) {
-          setMeals(nextMeals);
-          setSelected([]);
+          setMeals(previous => [...previous.filter(meal => meal.id.startsWith("upload-")), ...nextMeals]);
+          setSelected(previous => previous.filter(id => nextMeals.some(meal => meal.menu.some(menu => menu.id === id))));
           setMenuDate(date);
           setSyncState("live");
         }
@@ -171,15 +180,35 @@ export default function Home() {
 
   const allMenu = meals.flatMap((meal) => meal.menu);
   const todayTotal = useMemo(
-    () => allMenu.filter((item) => selected.includes(item.id)).reduce((sum, item) => sum + item.kcal, 0),
+    () => allMenu.filter((item) => selected.includes(item.id)).reduce((sum, item) => sum + (item.kcal || 0), 0),
     [allMenu, selected]
   );
+  const unknownSelected = allMenu.filter(item => selected.includes(item.id) && item.kcal === null).length;
   const filteredMeals = (cafeteria === "전체 식당" ? meals : meals.filter((meal) => meal.cafeteria === cafeteria))
     .filter((meal) => meal.time === mealType);
   const progress = Math.min(100, Math.round((todayTotal / (target === "다이어트" ? 1550 : target === "벌크업" ? 2500 : 2000)) * 100));
 
   function toggleSelection(id: string) {
     setSelected((previous) => previous.includes(id) ? previous.filter((menuId) => menuId !== id) : [...previous, id]);
+  }
+
+  function saveCalories(menuId: string) {
+    const kcal = Number(editValue);
+    if (!Number.isFinite(kcal) || kcal < 1 || kcal > 5000) { setNotice("칼로리를 1~5000 사이의 숫자로 입력해 주세요."); return; }
+    const overrides = readCalorieOverrides();
+    overrides[`${menuDate}:${menuId}`] = Math.round(kcal);
+    window.localStorage.setItem(CALORIE_OVERRIDES_KEY, JSON.stringify(overrides));
+    setMeals(previous => previous.map(meal => ({ ...meal, menu: meal.menu.map(menu => menu.id === menuId ? { ...menu, ...userCalories(Math.round(kcal)) } : menu) })));
+    setEditingMenu(null);
+    setNotice("입력한 칼로리를 이 기기에 저장했어요.");
+  }
+
+  function resetCalories(menuId: string) {
+    const overrides = readCalorieOverrides();
+    delete overrides[`${menuDate}:${menuId}`];
+    window.localStorage.setItem(CALORIE_OVERRIDES_KEY, JSON.stringify(overrides));
+    setMeals(previous => previous.map(meal => ({ ...meal, menu: meal.menu.map(menu => menu.id === menuId ? { ...menu, ...estimateCalories(menu.name) } : menu) })));
+    setEditingMenu(null);
   }
 
   function registerVote(nextVote: "like" | "dislike") {
@@ -202,12 +231,11 @@ export default function Home() {
       menu: cleaned.map((menuName, index) => ({
         id: `custom-${Date.now()}-${index}`,
         name: menuName,
-        kcal: [430, 170, 240, 85, 120][index] || 180,
+        ...estimateCalories(menuName),
         category: "사용자 등록",
         tags: ["추정"],
         score: 0,
         votes: 0,
-        confidence: "낮음"
       }))
     };
     setMeals((previous) => [newMeal, ...previous]);
@@ -241,6 +269,7 @@ export default function Home() {
           selected={selected}
           toggleSelection={toggleSelection}
           total={todayTotal}
+          unknownSelected={unknownSelected}
           progress={progress}
           target={target}
           onVote={registerVote}
@@ -248,6 +277,13 @@ export default function Home() {
           setView={setView}
           syncState={syncState}
           menuDate={menuDate}
+          editingMenu={editingMenu}
+          editValue={editValue}
+          setEditValue={setEditValue}
+          onEdit={(menu) => { setEditingMenu(menu.id); setEditValue(menu.kcal === null ? "" : String(menu.kcal)); }}
+          onCancelEdit={() => setEditingMenu(null)}
+          onSaveCalories={saveCalories}
+          onResetCalories={resetCalories}
         />}
         {view === "upload" && <UploadView onComplete={addUploadedMeal} />}
         {view === "records" && <RecordsView selected={selected} allMenu={allMenu} total={todayTotal} />}
@@ -262,11 +298,11 @@ export default function Home() {
   );
 }
 
-function HomeView({ meals, allMeals, cafeteria, setCafeteria, mealType, setMealType, selected, toggleSelection, total, progress, target, onVote, vote, setView, syncState, menuDate }: {
-  meals: Meal[]; allMeals: Meal[]; cafeteria: string; setCafeteria: (value: string) => void; mealType: Meal["time"]; setMealType: (value: Meal["time"]) => void; selected: string[]; toggleSelection: (id: string) => void; total: number; progress: number; target: string; onVote: (value: "like" | "dislike") => void; vote: "like" | "dislike" | null; setView: (view: string) => void; syncState: "loading" | "live" | "fallback"; menuDate: string;
+function HomeView({ meals, allMeals, cafeteria, setCafeteria, mealType, setMealType, selected, toggleSelection, total, unknownSelected, progress, target, onVote, vote, setView, syncState, menuDate, editingMenu, editValue, setEditValue, onEdit, onCancelEdit, onSaveCalories, onResetCalories }: {
+  meals: Meal[]; allMeals: Meal[]; cafeteria: string; setCafeteria: (value: string) => void; mealType: Meal["time"]; setMealType: (value: Meal["time"]) => void; selected: string[]; toggleSelection: (id: string) => void; total: number; unknownSelected: number; progress: number; target: string; onVote: (value: "like" | "dislike") => void; vote: "like" | "dislike" | null; setView: (view: string) => void; syncState: "loading" | "live" | "fallback"; menuDate: string; editingMenu: string | null; editValue: string; setEditValue: (value: string) => void; onEdit: (menu: Menu) => void; onCancelEdit: () => void; onSaveCalories: (id: string) => void; onResetCalories: (id: string) => void;
 }) {
   const relevantMeals = allMeals.filter((meal) => meal.time === mealType);
-  const recommendedMeal = (relevantMeals.length ? relevantMeals : allMeals).flatMap((meal) => meal.menu)
+  const recommendedMeal = (relevantMeals.length ? relevantMeals : allMeals).flatMap((meal) => meal.menu).filter(menu => menu.kcal !== null)
     .sort((first, second) => (second.score * 10 + second.votes) - (first.score * 10 + first.votes))[0];
   const recommendation = recommendedMeal || allMeals[0]?.menu[0];
   const recommendationRestaurant = allMeals.find((meal) => meal.menu.some((menu) => menu.id === recommendation?.id));
@@ -285,7 +321,7 @@ function HomeView({ meals, allMeals, cafeteria, setCafeteria, mealType, setMealT
         <div><p className="restaurant">{recommendationRestaurant?.cafeteria || "식샤 연동 식당"}</p><h2>{recommendation.name}</h2><p className="why">식샤 이용자 평점과 인기를 바탕으로 추천했어요.</p></div>
         <div className="food-emoji">🍝</div>
       </div>
-      <div className="recommend-footer"><span>{recommendation.score ? <>★ {recommendation.score.toFixed(1)} <small>({recommendation.votes}명)</small></> : "신규 메뉴"}</span><span>{formatKcal(recommendation.kcal)} · 추정치</span></div>
+      <div className="recommend-footer"><span>{recommendation.score ? <>★ {recommendation.score.toFixed(1)} <small>({recommendation.votes}명)</small></> : "신규 메뉴"}</span><span>{formatKcal(recommendation.kcal)} · {recommendation.confidence === "직접 입력" ? "직접 입력" : "추정치"}</span></div>
       <div className="vote-row"><span>이 추천, 마음에 드나요?</span><button className={vote === "like" ? "selected-vote" : ""} onClick={() => onVote("like")}>👍 맛있어 보여요</button><button className={vote === "dislike" ? "selected-vote" : ""} onClick={() => onVote("dislike")}>👎 별로예요</button></div>
     </section>
 
@@ -293,7 +329,7 @@ function HomeView({ meals, allMeals, cafeteria, setCafeteria, mealType, setMealT
       <div><p>오늘 선택한 메뉴</p><strong>{formatKcal(total)}</strong><span> / {target === "다이어트" ? "1,550" : target === "벌크업" ? "2,500" : "2,000"} kcal</span></div>
       <div className="ring" style={{ "--progress": `${progress * 3.6}deg` } as React.CSSProperties}><b>{progress}%</b></div>
       <div className="bar"><i style={{ width: `${progress}%` }} /></div>
-      <p className="calorie-caption">선택한 메뉴를 눌러 합계에 추가하거나 뺄 수 있어요.</p>
+      <p className="calorie-caption">선택한 메뉴를 눌러 합계에 추가하거나 뺄 수 있어요.{unknownSelected > 0 && ` 칼로리 미확인 ${unknownSelected}개는 합계에서 제외됐어요.`}</p>
     </section>
 
     <section className="meal-heading"><div><p className="eyebrow">오늘의 식단</p><h2>어디서 먹을까요?</h2></div><button onClick={() => setView("upload")}>식단 등록 <span>＋</span></button></section>
@@ -305,9 +341,13 @@ function HomeView({ meals, allMeals, cafeteria, setCafeteria, mealType, setMealT
     <div className="meal-list">
       {meals.map((meal) => <article className="meal-card" key={meal.id}>
         <div className="meal-title"><div className="meal-icon">{meal.emoji}</div><div><h3>{meal.cafeteria}</h3><p>{meal.location} · {meal.time}</p></div><button className="more" aria-label={`${meal.cafeteria} 상세 보기`}>···</button></div>
-        <div className="menu-list">{meal.menu.map((menu) => <button key={menu.id} className={`menu-item ${selected.includes(menu.id) ? "checked" : ""}`} onClick={() => toggleSelection(menu.id)}>
-          <span className="check">{selected.includes(menu.id) ? "✓" : ""}</span><span className="menu-name">{menu.name}<small>{menu.tags.map(tag => <i key={tag}>{tag}</i>)}</small></span><span className="menu-meta"><b>{formatKcal(menu.kcal)}</b><small>{menu.price ? `${menu.price.toLocaleString("ko-KR")}원 · ` : ""}{menu.confidence} 신뢰도</small></span>
-        </button>)}</div>
+        <div className="menu-list">{meal.menu.map((menu) => <div className="menu-entry" key={menu.id}>
+          <div className="menu-entry-top"><button className={`menu-item ${selected.includes(menu.id) ? "checked" : ""}`} onClick={() => toggleSelection(menu.id)}>
+            <span className="check">{selected.includes(menu.id) ? "✓" : ""}</span><span className="menu-name">{menu.name}<small>{menu.tags.map(tag => <i key={tag}>{tag}</i>)}</small></span><span className="menu-meta"><b>{formatKcal(menu.kcal)}</b><small>{menu.price ? `${menu.price.toLocaleString("ko-KR")}원 · ` : ""}{menu.confidence === "직접 입력" ? "직접 입력" : `${menu.confidence} 신뢰도`}</small></span>
+          </button><button className="calorie-edit-button" onClick={() => onEdit(menu)} aria-label={`${menu.name} 칼로리 수정`}>수정</button></div>
+          <p className="calorie-basis">{menu.low != null && menu.high != null && menu.confidence !== "직접 입력" ? `예상 ${menu.low.toLocaleString("ko-KR")}~${menu.high.toLocaleString("ko-KR")} kcal · ` : ""}{menu.basis || "예시 식단의 칼로리 추정치"}{menu.sourceUrl && <> · <a href={menu.sourceUrl} target="_blank" rel="noopener noreferrer">참고 자료</a></>}</p>
+          {editingMenu === menu.id && <div className="calorie-editor"><label>확인한 칼로리 (kcal)<input type="number" min="1" max="5000" inputMode="numeric" value={editValue} onChange={event => setEditValue(event.target.value)} /></label><button onClick={() => onSaveCalories(menu.id)}>저장</button><button onClick={() => onResetCalories(menu.id)}>추정치로 되돌리기</button><button onClick={onCancelEdit}>취소</button></div>}
+        </div>)}</div>
         <div className="meal-bottom"><span>{meal.menu[0].score ? <>★ {meal.menu[0].score.toFixed(1)} <small>{meal.menu[0].votes}명 평가</small></> : "식샤 등록 메뉴"}</span><button>상세 보기 ›</button></div>
       </article>)}
       {!meals.length && <div className="empty"><span>🍽️</span><h3>등록된 식단이 없어요</h3><p>직접 입력하거나 이미지로 식단을 등록해 보세요.</p></div>}
