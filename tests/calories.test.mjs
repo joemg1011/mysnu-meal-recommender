@@ -22,6 +22,10 @@ test('a named cutlet set includes disclosed rice and sides without double-counti
   const burger=estimateCalories('치킨버거 세트');
   assert.match(burger.basis,/감자튀김 100g/);
   assert.doesNotMatch(burger.basis,/밥 200g/);
+  const bowl=estimateCalories('제육덮밥');
+  const bowlSet=estimateCalories('제육덮밥 정식');
+  assert.ok(bowlSet.kcal-bowl.kcal<150,'rice already included in a rice bowl must not be added twice');
+  assert.doesNotMatch(bowlSet.basis,/밥 200g/);
 });
 
 test('dumpling soup and menu notices do not silently become a different meal',()=>{

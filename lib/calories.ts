@@ -200,7 +200,8 @@ function food(name: string): CalorieEstimate {
     if (/가스|까츠|제육|불고기|구이|함박|스테이크|강정|치킨|찌개|탕|버거|샌드위치/.test(mainName)) {
       const mainDish = food(mainName);
       const burgerSet = /버거|샌드위치/.test(mainName);
-      const includesRice = !burgerSet && !/밥\s*(?:제외|별도)/.test(withoutSize);
+      const mainHasStaple = /덮밥|비빔밥|볶음밥|라이스|카레|도시락|컵밥|김밥|솥밥|면|국수|우동|파스타/.test(mainName);
+      const includesRice = !burgerSet && !mainHasStaple && !/밥\s*(?:제외|별도)/.test(withoutSize);
       const side = burgerSet ? modeled([ingredient('감자튀김',100,280),ingredient('음료',250,42)], '세트 곁들임 가정')
         : modeled([ingredient('국',120,30),ingredient('반찬',60,70)], '정식 곁들임 가정');
       const estimates = [mainDish, side, ...(includesRice ? [rice()] : [])];
