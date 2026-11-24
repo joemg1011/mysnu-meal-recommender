@@ -2,6 +2,35 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { estimateCalories } from "../lib/calories.ts";
 
+test('noodle variants retain the noodles rather than matching the word soup',()=>{
+  for(const name of ['우삼겹 쌀국수','닭칼국수','들깨칼국수','매운 비빔국수']) {
+    const result=estimateCalories(name);
+    assert.match(result.basis,/익힌 면.*250g/,name);
+    assert.doesNotMatch(result.basis,/국물 요리 한 그릇/,name);
+    assert.ok(result.kcal>400,name);
+  }
+});
+
+test('a named cutlet set includes disclosed rice and sides without double-counting rice',()=>{
+  const single=estimateCalories('돈가스');
+  const set=estimateCalories('돈가스 정식');
+  assert.ok(set.kcal>single.kcal+300);
+  assert.match(set.basis,/밥 200g/);
+  assert.match(set.basis,/반찬 60g/);
+  assert.equal(estimateCalories('돈가스 정식(밥포함)').kcal,set.kcal);
+  assert.ok(estimateCalories('돈가스 정식(밥별도)').kcal<set.kcal);
+  const burger=estimateCalories('치킨버거 세트');
+  assert.match(burger.basis,/감자튀김 100g/);
+  assert.doesNotMatch(burger.basis,/밥 200g/);
+});
+
+test('dumpling soup and menu notices do not silently become a different meal',()=>{
+  assert.match(estimateCalories('얼큰 만둣국').basis,/만두 180g.*국물·채소 250g/);
+  assert.equal(estimateCalories('공기밥 + TAKE-OUT').kcal,estimateCalories('공기밥').kcal);
+  assert.equal(estimateCalories('TAKE-OUT + 신메뉴').kcal,null);
+  assert.equal(estimateCalories('+++').kcal,null);
+});
+
 test("MFDS per-100ml data is scaled by the reference serving amount", () => {
   const result = estimateCalories("제육볶음");
   assert.equal(result.kcal, 200); // 148 kcal / 100ml × 136.4ml, rounded to 10 kcal

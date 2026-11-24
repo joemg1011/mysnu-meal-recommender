@@ -61,7 +61,7 @@ function fromReference(key: string, approximate = false): CalorieEstimate | null
   if (!rows?.length) return null;
   const row = [...rows].sort((a, b) => referenceRank(a) - referenceRank(b))[0];
   if (row.servingAmount <= row.basisAmount) {
-    const assumed = /밥|덮밥|비빔밥|라이스/.test(key) ? 450 : /마라탕|곰탕|갈비탕/.test(key) ? 550 : /탕|찌개|국/.test(key) ? 350 : /쌀국수|우동|냉면|국수|라멘/.test(key) ? 600 : /면|파스타/.test(key) ? 400 : /가스|구이|볶음/.test(key) ? 180 : /샐러드/.test(key) ? 300 : 250;
+    const assumed = /밥|덮밥|비빔밥|라이스/.test(key) ? 450 : /쌀국수|우동|냉면|국수|라멘/.test(key) ? 600 : /면|파스타/.test(key) ? 400 : /마라탕|곰탕|갈비탕/.test(key) ? 550 : /탕|찌개|국/.test(key) ? 350 : /가스|구이|볶음/.test(key) ? 180 : /샐러드/.test(key) ? 300 : 250;
     return { ...range(row.kcalPerBasis * assumed / row.basisAmount, 0.5, `식약처 '${row.name}' ${row.kcalPerBasis} kcal/${row.basisAmount}${row.unit} × 일반 1인분 ${assumed}${row.unit} 가정. 실제 학식의 중량은 확인되지 않았어요.`, "낮음", sourceUrl(row)),
       sourceUrl: sourceUrl(row), perBasisKcal: row.kcalPerBasis, basisAmount: row.basisAmount, amountUnit: row.unit };
   }
@@ -112,7 +112,7 @@ function modeledFood(raw: string): CalorieEstimate {
   if (/연두부|온두부/.test(text)) return modeled([ingredient("두부", 150, 80)], "두부 150g 가정", 0.5);
   if (/산적/.test(text)) return modeled([ingredient("고기·채소 산적", 120, 210)], "산적 2꼬치, 총 120g 가정");
   if (/새우까스/.test(text)) return modeled([ingredient("새우까스", 150, 250)], "새우까스 1개 150g 가정");
-  if (/만두/.test(text)) return modeled([ingredient("만두", 180, 210)], "만두 6개, 총 180g 가정");
+  if (/만두|만둣/.test(text) && !/국|탕|면|전골/.test(text)) return modeled([ingredient("만두", 180, 210)], "만두 6개, 총 180g 가정");
   if (/피자/.test(text)) return modeled([ingredient("피자", 300, 260)], "피자 2조각, 총 300g 가정");
   if (/김소떡|소떡/.test(text)) return modeled([ingredient("떡·소시지 꼬치", 130, 250)], "꼬치 1개 130g 가정");
   if (/팝콘볼/.test(text)) return modeled([ingredient("튀김 간식", 200, 270)], "팝콘볼 한 상자 200g 가정");
@@ -139,8 +139,9 @@ function modeledFood(raw: string): CalorieEstimate {
   if (/포케/.test(text)) return modeled([bowlRice(160), main, veg(120), ingredient("드레싱", 30, 270)], "포케 한 그릇 가정");
   if (/마요/.test(text)) return modeled([bowlRice(), main, ingredient("마요네즈", 25, 680), veg(40)], "마요 덮밥 한 그릇 가정");
   if (/비빔밥|덮밥|볶음밥|나시고랭|라이스|오므라이스/.test(text)) return modeled([bowlRice(), main, veg(100), sauce(35)], "밥 메뉴 한 그릇 가정");
-  if (/찌개|탕|국|전골/.test(text)) return modeled([ingredient("국물·채소", 230, 45), main, ingredient("양념·기름", 25, 200)], "국물 요리 한 그릇(밥 제외) 가정");
   if (/쌀국수|우동|라멘|냉면|국수|칼국수|짬뽕|막국수|비빔면|볶음면|면/.test(text)) return modeled([ingredient("익힌 면", 250, 150), ingredient("국물·소스", 220, /비빔|볶음|마라/.test(text) ? 90 : 40), { ...main, grams: 70 }, veg(70)], "면 요리 한 그릇 가정");
+  if (/만두|만둣/.test(text) && /국|탕|전골/.test(text)) return modeled([ingredient("만두", 180, 210), ingredient("국물·채소", 250, 40), ...(/떡/.test(text) ? [ingredient("떡", 100, 220)] : [])], "만둣국 한 그릇(밥 제외) 가정");
+  if (/찌개|탕|국|전골/.test(text)) return modeled([ingredient("국물·채소", 230, 45), main, ingredient("양념·기름", 25, 200)], "국물 요리 한 그릇(밥 제외) 가정");
   if (/파스타/.test(text)) return modeled([ingredient("익힌 파스타", 220, 160), ingredient("소스", 150, 130), { ...main, grams: 80 }], "파스타 한 접시 가정");
   if (/돈가스|까츠/.test(text)) return modeled([ingredient("튀긴 고기", 180, 280), ingredient("소스", 35, 120), veg(50), ...(/치즈/.test(text) ? [ingredient("치즈", 40, 300)] : [])], "돈가스 단품(밥 제외) 가정");
   if (/샐러드/.test(text)) return modeled([veg(180), { ...main, grams: 80 }, ingredient("드레싱", 30, 270)], "샐러드 한 접시 가정");
@@ -177,6 +178,8 @@ function food(name: string): CalorieEstimate {
   const nameWithoutRice = raw.replace(/\(?\s*(?:공기)?밥\s*포함\s*\)?/g, "").trim();
   if (riceIncluded && !nameWithoutRice) return rice();
   if (riceIncluded) {
+    // A named set already supplies its explicitly disclosed rice assumption.
+    if (/정식|세트/.test(nameWithoutRice)) return food(nameWithoutRice);
     const dish = food(nameWithoutRice);
     const side = rice();
     if (dish.kcal === null || side.kcal === null) return unknown("구성품이 음식이 아니라 합계를 계산할 수 없어요.");
@@ -192,6 +195,20 @@ function food(name: string): CalorieEstimate {
   }
 
   const withoutSize = raw.replace(/\s*:\s*[\d,]+\s*원.*$/, "").trim();
+  if (/정식|세트/.test(withoutSize)) {
+    const mainName = withoutSize.replace(/정식|세트/g, '').replace(/\(?밥\s*(?:제외|별도)\)?/g, '').trim();
+    if (/가스|까츠|제육|불고기|구이|함박|스테이크|강정|치킨|찌개|탕|버거|샌드위치/.test(mainName)) {
+      const mainDish = food(mainName);
+      const burgerSet = /버거|샌드위치/.test(mainName);
+      const includesRice = !burgerSet && !/밥\s*(?:제외|별도)/.test(withoutSize);
+      const side = burgerSet ? modeled([ingredient('감자튀김',100,280),ingredient('음료',250,42)], '세트 곁들임 가정')
+        : modeled([ingredient('국',120,30),ingredient('반찬',60,70)], '정식 곁들임 가정');
+      const estimates = [mainDish, side, ...(includesRice ? [rice()] : [])];
+      return {kcal:estimates.reduce((sum,item)=>sum+(item.kcal||0),0),low:estimates.reduce((sum,item)=>sum+(item.low||0),0),high:estimates.reduce((sum,item)=>sum+(item.high||0),0),confidence:'낮음',
+        basis:`정식·세트 구성 가정(실제 구성 확인 필요): ${estimates.map(item=>item.basis).join(' + ')}`,sourceUrl:mainDish.sourceUrl};
+    }
+    return modeled([bowlRice(180),ingredient('주요리',120,190),veg(150),ingredient('국·반찬·소스',200,80)], '구성 미상 세트의 한 접시 가정',.65);
+  }
   const composite = /돈가스.*(면|국수|우동|카레)|(?:면|국수|우동|카레).*돈가스|새우튀김.*카레|카레.*새우튀김|포케|마요|나시고랭/.test(normalized(withoutSize));
   if (composite) return modeledFood(withoutSize);
   const exact = fromReference(withoutSize);
@@ -223,14 +240,15 @@ export function estimateCalories(name: string): CalorieEstimate {
     ? cleaned.replace(/^.*?세트\s*[-–]\s*/, "").split("=")[0].trim()
     : cleaned;
   const parts = foodDescription.split(/\s*[+&]\s*/).map(part => part.trim()).filter(Boolean);
+  if (!parts.length) return unknown('음식명이 없어 계산할 수 없어요.');
   if (parts.length === 1) return food(parts[0]);
   if (parts.length > 6) return modeledFood("뷔페 세트");
   const estimates = parts.map(food);
   if (estimates.some(item => item.kcal === null)) {
     if (/뷔페|부페/.test(cleaned)) return modeledFood("뷔페 세트");
     const edible = estimates.filter(item => item.kcal !== null);
-    if (edible.length < 2) return modeledFood("뷔페 세트");
-    return unknown("구성품 중 음식명이 아닌 항목이 있어 합계를 계산할 수 없어요.");
+    if (!edible.length) return unknown('음식명이 아닌 안내 항목은 계산에서 제외했어요.');
+    return {kcal:edible.reduce((sum,item)=>sum+(item.kcal||0),0),low:edible.reduce((sum,item)=>sum+(item.low||0),0),high:edible.reduce((sum,item)=>sum+(item.high||0),0),confidence:'낮음',basis:`안내 항목 제외 후 구성품 합계: ${edible.map(item=>item.basis).join(' + ')}`};
   }
   if (estimates.filter(item => (item.kcal || 0) >= 400).length > 1 && !/반마리|\d+\s*조각|\(소\)/.test(foodDescription)) {
     const scaled = estimates.map(item => (item.kcal || 0) >= 400 ? {
